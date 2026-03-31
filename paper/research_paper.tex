@@ -1,0 +1,829 @@
+% ============================================================
+%  Context-Aware Vocabulary Pruning for LLM Inference
+%  Two-column arXiv-style  |  pdflatex
+% ============================================================
+\documentclass[twocolumn,10pt]{article}
+
+% ── Geometry ────────────────────────────────────────────────
+\usepackage[
+  a4paper,
+  top=19mm, bottom=23mm,
+  left=14mm, right=14mm,
+  columnsep=6mm
+]{geometry}
+
+% ── Core packages ───────────────────────────────────────────
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{url}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{multirow}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+
+% ── Hyperref (load last) ─────────────────────────────────────
+\usepackage[
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  citecolor=green!50!black,
+  urlcolor=blue!70!black,
+  pdftitle={Context-Aware Vocabulary Pruning for LLM Inference Acceleration},
+  pdfauthor={}
+]{hyperref}
+
+% ── Caption style ────────────────────────────────────────────
+\captionsetup{font=small, labelfont=bf, skip=4pt}
+
+% ── Section spacing ──────────────────────────────────────────
+\usepackage{titlesec}
+\titlespacing*{\section}{0pt}{8pt plus 2pt minus 1pt}{4pt plus 1pt}
+\titlespacing*{\subsection}{0pt}{6pt plus 1pt}{3pt plus 1pt}
+\titlespacing*{\subsubsection}{0pt}{4pt plus 1pt}{2pt plus 1pt}
+
+% ── Paragraph spacing ────────────────────────────────────────
+\setlength{\parskip}{2pt}
+\setlength{\parindent}{1em}
+
+% ── Abstract ─────────────────────────────────────────────────
+\usepackage{abstract}
+\renewcommand{\abstractnamefont}{\normalfont\bfseries\small}
+\renewcommand{\abstracttextfont}{\small}
+\setlength{\absleftindent}{0pt}
+\setlength{\absrightindent}{0pt}
+
+% ── Code / monospace ─────────────────────────────────────────
+\usepackage{listings}
+\lstset{basicstyle=\ttfamily\footnotesize, breaklines=true}
+
+% ── Inline code helper ───────────────────────────────────────
+\newcommand{\code}[1]{\texttt{#1}}
+
+% ── Table helpers ────────────────────────────────────────────
+\newcommand{\tblhead}[1]{\textbf{#1}}
+\setlength{\tabcolsep}{4pt}
+
+% ── Title block ──────────────────────────────────────────────
+\title{%
+  \vspace{-4mm}%
+  \LARGE\bfseries
+  Context-Aware Vocabulary Pruning for\\[2pt]
+  LLM Inference Acceleration:\\[2pt]
+  A Dual-Encoder Retrieval Approach%
+  \vspace{-2mm}
+}
+\author{%
+  \normalsize
+  Working draft --- MPS results complete; GPU benchmarks pending\\[2pt]
+  \small\textit{March 2026}
+}
+\date{}
+
+% ============================================================
+\begin{document}
+% ============================================================
+
+\maketitle
+\thispagestyle{empty}
+
+% ── Abstract ─────────────────────────────────────────────────
+\begin{abstract}
+Autoregressive decoding in large language models is dominated by two costs at
+each token step: KV-cache attention and the \code{lm\_head} vocabulary
+projection --- a matrix multiply that reads the full $[V \times d]$ weight
+matrix from GPU memory on every step. At batch size 1, this operation is
+\textbf{memory-bandwidth-bound}: the GPU's arithmetic units sit idle while
+525\,MB of weights are streamed from VRAM per token. We address this
+bottleneck through \textbf{dynamic vocabulary pruning}, restricting the
+\code{lm\_head} projection to a context-dependent shortlist of $K$ candidate
+tokens at each step, reducing memory traffic by up to 99.6\%.
+
+We propose a \textbf{Dual-Encoder Router} --- a lightweight MLP (0.06\% of
+model parameters) trained with Multiple Negatives Ranking Loss to map the
+model's hidden state to a query vector, then retrieve the top-$K$ token
+candidates by nearest-neighbour search over a pre-indexed corpus of sentence
+completions. We benchmark four routing strategies against a full-vocabulary
+baseline on WikiText-2 (\code{Llama-3.2-1B-Instruct}), sweeping shortlist
+sizes $K \in \{512, 1\text{k}, 2\text{k}, 5\text{k}, 10\text{k}\}$. The
+primary demonstrated gain is a 92--99.6\% reduction in \code{lm\_head} memory
+bandwidth. Wall-clock speedup requires GPU-native kernels or larger models
+(70B+) where the memory-bound regime is more pronounced.
+\end{abstract}
+
+% ────────────────────────────────────────────────────────────
+\section{Introduction}
+% ────────────────────────────────────────────────────────────
+
+\subsection{The Autoregressive Bottleneck}
+
+Modern LLMs generate text one token at a time. Despite the fact that the
+transformer's attention mechanism is highly parallelisable over the
+\emph{input} sequence, the \emph{generation} process is fundamentally
+sequential: each new token depends on all previously generated tokens.
+
+Within each step of this loop, the two most expensive operations are:
+\begin{enumerate}[leftmargin=*, itemsep=0pt, topsep=2pt]
+  \item \textbf{KV-cache attention} --- computing attention over the growing
+        sequence of past tokens.
+  \item \textbf{Vocabulary projection (\code{lm\_head})} --- projecting the
+        final hidden state onto the full vocabulary to obtain next-token
+        logits.
+\end{enumerate}
+
+On CPU and Apple Silicon (MPS) --- where memory bandwidth rather than raw
+FLOP throughput is the binding constraint --- the \code{lm\_head} matrix
+multiplication can account for a disproportionate share of per-token latency.
+
+\subsection{The Wasted Computation Insight}
+
+At any given decoding step, the probability mass over the vocabulary is highly
+concentrated. In predictable contexts (e.g., ``The Eiffel Tower is located
+in\ldots'') the top-1 token may carry $>$99\% probability. The model still
+computes logits for all 32k--128k vocabulary entries. This motivates a natural
+question: \emph{can the model's own internal representation predict which
+vocabulary region is relevant before the full projection is run?}
+
+\subsection{Contributions}
+
+\begin{enumerate}[leftmargin=*, itemsep=0pt, topsep=2pt]
+  \item \textbf{Profiling.} We quantify the \code{lm\_head} fraction of
+        per-token latency for a 1B open-source LLM on MPS hardware.
+  \item \textbf{Router taxonomy.} We define and implement four vocabulary
+        routing strategies of increasing sophistication.
+  \item \textbf{Dual-Encoder Router.} A lightweight MLP trained with MNRL
+        that maps the LLM's hidden state to a compact token shortlist,
+        operating entirely within the model's own latent space.
+  \item \textbf{Benchmark.} All methods evaluated on WikiText-2, reporting
+        token acceptance rate, perplexity, and tokens/sec across
+        $K \in \{512,1\text{k},2\text{k},5\text{k},10\text{k}\}$.
+\end{enumerate}
+
+% ────────────────────────────────────────────────────────────
+\section{Background}
+% ────────────────────────────────────────────────────────────
+
+\subsection{Self-Attention and the Hidden State}
+
+A transformer processes an input sequence by stacking each token's embedding
+into a matrix. At each layer, self-attention allows every token's
+representation to incorporate information from all preceding tokens. By the
+final layer, the last row of the hidden state matrix --- the \textbf{``vibe''} ---
+summarises the full context:
+\[
+  h_T = H^{(L)}_{T,:} \;\in\; \mathbb{R}^{d}.
+\]
+
+\subsection{The \texttt{lm\_head} as a Bottleneck}
+
+The language modelling head maps the hidden state to a distribution over the
+vocabulary:
+\begin{equation}
+  \text{logits} = h_T W_V^\top \;\in\; \mathbb{R}^{|V|}
+\end{equation}
+where $W_V \in \mathbb{R}^{|V| \times d}$ is the vocabulary embedding matrix.
+At 16-bit precision, $W_V$ for Llama-3.2-1B occupies
+$128{,}256 \times 2{,}048 \times 2\,\text{bytes} = \mathbf{525\,\text{MB}}$.
+Reading 525\,MB per token step creates a hard ceiling on achievable
+tokens/sec independent of model depth.
+
+\subsection{Speculative Decoding and Related Work}
+
+\textbf{Speculative decoding}~\cite{leviathan2023,chen2023} accelerates
+autoregressive generation by interposing a small draft model that proposes
+candidate tokens. A large verifier model evaluates the entire candidate
+sequence in a single parallel forward pass.
+
+Extensions include \textbf{Medusa}~\cite{cai2024}, which attaches multiple
+decoding heads to the base model, and \textbf{tree-based speculative
+decoding}, which generates a tree of candidate sequences from multiple draft
+models. Our approach is orthogonal to all of these: it targets the
+\code{lm\_head} projection cost directly and can be combined with any of the
+above methods.
+
+\subsection{Dual-Encoders and Contrastive Learning}
+
+A \textbf{Dual-Encoder} processes two inputs through separate encoder towers
+and learns to embed related pairs close together in a shared vector space.
+\textbf{Multiple Negatives Ranking Loss (MNRL)}~\cite{henderson2017,karpukhin2020}
+is the standard training objective. Given a batch of $(a_i, p_i)$
+anchor-positive pairs:
+\begin{equation}
+  \mathcal{L} = -\frac{1}{B}\sum_{i=1}^{B}
+    \log\frac{\exp(\text{sim}(a_i,p_i)/\tau)}
+             {\sum_{j=1}^{B}\exp(\text{sim}(a_i,p_j)/\tau)}
+\end{equation}
+where $\text{sim}(\cdot,\cdot)$ is cosine similarity and $\tau$ is a
+temperature parameter. All other positives in the batch serve as in-batch
+negatives, requiring no explicit negative mining.
+
+% ────────────────────────────────────────────────────────────
+\section{Method}
+% ────────────────────────────────────────────────────────────
+
+\subsection{Problem Formalisation}
+
+Let $f_\theta$ be a frozen autoregressive LLM with vocabulary $V$, model
+dimension $d$, and vocabulary projection matrix $W_V$. At decoding step $t$:
+\[
+  \hat{y}_t = \arg\max_{v \in V}(h_t W_V^\top)_v.
+\]
+\textbf{Goal}: learn a router $r_\phi : \mathbb{R}^d \to 2^V$ such that
+(i) $\hat{y}_t \in r_\phi(h_t)$ with high probability (\emph{acceptance
+rate}), (ii) $|r_\phi(h_t)| \ll |V|$ (\emph{compression ratio}), and
+(iii) the latency of computing $r_\phi(h_t)$ is small relative to the savings.
+
+\subsection{Router Taxonomy}
+
+We implement four routing strategies of increasing sophistication
+(Table~\ref{tab:routers}).
+
+\begin{table}[h]
+\centering
+\caption{Router taxonomy.}
+\label{tab:routers}
+\small
+\begin{tabular}{@{}lp{4.0cm}c@{}}
+\toprule
+\tblhead{Router} & \tblhead{Description} & \tblhead{Training} \\
+\midrule
+Static Top-K & Highest $\|W_V[v,:]\|_2$ (context-free) & None \\
+Cosine       & Highest $\cos(h_t, W_V[v,:])$           & None \\
+Cluster      & Pre-cluster $W_V$; top-$C$ clusters by $\cos(h_t,\mu_c)$ & Offline \\
+Dual-Encoder & Learned MLP; ANN search over $W_V$      & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Dual-Encoder Router Design}
+
+\subsubsection{Architecture}
+A lightweight MLP projection head $g_\phi : \mathbb{R}^d \to \mathbb{R}^{d_r}$
+is trained to map the frozen LLM's hidden state to a query vector in a shared
+embedding space. The vocabulary token embeddings $W_V$ serve as the corpus
+searched at inference time. Both query and keys live in the LLM's own latent
+space; no cross-model alignment is required.
+
+\subsubsection{Training Data Construction}
+From the WikiText-2 training split: (1) tokenise each sentence; (2) for each
+sentence of length $T \geq 8$, sample a split point
+$s \sim \text{Uniform}(\lfloor 0.4T\rfloor, \lfloor 0.7T\rfloor)$;
+(3) \emph{anchor}: run the frozen LLM on the prefix and extract $h_s$;
+(4) \emph{positive}: the ground-truth next token $y_{s+1}$, represented as
+$W_V[y_{s+1},:]$.
+
+\subsubsection{Training Objective}
+\begin{equation}
+  \mathcal{L} = -\frac{1}{B}\sum_{i=1}^{B}
+    \log\frac{\exp(\cos(g_\phi(h_i),W_V[y_i,:])/\tau)}
+             {\sum_{j=1}^{B}\exp(\cos(g_\phi(h_i),W_V[y_j,:])/\tau)}
+\end{equation}
+with in-batch negatives (all $y_j \neq y_i$ in the batch).
+
+\subsubsection{Inference Integration}
+(1) Pre-compute and cache all rows of $W_V$ normalised to unit length.
+(2) At step $t$: compute $q_t = g_\phi(h_t)$; retrieve the $K$ token indices
+with highest $\cos(q_t, W_V[v,:])$ via brute-force matmul.
+(3) Slice $W_V$ to the shortlist and compute logits only over those $K$ rows.
+
+% ────────────────────────────────────────────────────────────
+\section{Experimental Setup}
+% ────────────────────────────────────────────────────────────
+
+\subsection{Model}
+\code{meta-llama/Llama-3.2-1B-Instruct} --- 1B parameters, 2048-dim hidden
+state, 128,256-token vocabulary, 16 transformer layers, \code{bfloat16},
+running on Apple Silicon (MPS).
+
+\subsection{Dataset}
+\textbf{WikiText-2-raw-v1}~\cite{merity2016}: standard language modelling
+benchmark; plain English prose. Router training: \code{train} split
+(${\sim}2$M tokens). Perplexity evaluation: \code{test} split
+(${\sim}240$k tokens). Latency benchmark: 50 randomly sampled contiguous
+passages of 128 tokens from the \code{validation} split.
+
+\subsection{Hardware}
+Apple M-series chip, MPS backend, 16\,GB unified memory, model in
+\code{bfloat16}. All latency measurements taken after a 5-step warm-up;
+reported as mean over 50 prompts.
+
+\subsection{Evaluation Metrics}
+
+\begin{itemize}[leftmargin=*, itemsep=1pt, topsep=2pt]
+  \item \textbf{Token acceptance rate}: fraction of steps where the
+        ground-truth token is in the shortlist.
+  \item \textbf{Perplexity (PPL)}: $\exp\!\bigl(-\frac{1}{N}\sum_t \log
+        P_\theta(y_t \mid y_{<t})\bigr)$ over the \code{test} split.
+  \item \textbf{$\Delta$PPL}: $\text{PPL}_{\text{pruned}} -
+        \text{PPL}_{\text{baseline}}$.
+  \item \textbf{Tokens/sec}: wall-clock generation speed, mean over 50 prompts.
+  \item \textbf{\code{lm\_head} time \%}: fraction of per-token time spent in
+        the vocabulary projection.
+\end{itemize}
+
+% ────────────────────────────────────────────────────────────
+\section{Results}
+% ────────────────────────────────────────────────────────────
+
+All experiments: Apple Silicon (MPS), \code{bfloat16},
+\code{Llama-3.2-1B-Instruct}. Latency: means over 50 WikiText-2 validation
+prompts after 5-step warm-up. Perplexity: full WikiText-2 test split.
+
+\subsection{Baseline Profiling}
+
+\begin{table}[h]
+\centering
+\caption{Full-vocabulary baseline measurements.}
+\label{tab:baseline}
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+\tblhead{Metric} & \tblhead{Value} \\
+\midrule
+Tokens/sec (full vocab)        & \textbf{22.80} \\
+Mean step time                 & 43.9\,ms \\
+\code{lm\_head} time (mean)    & 6.2\,ms \\
+\code{lm\_head} time \%        & \textbf{14.1\%} \\
+Baseline perplexity (WikiText-2 test) & \textbf{26.26} \\
+\code{lm\_head} weight matrix  & 525\,MB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The \code{lm\_head} accounts for only 14.1\% of per-token latency. This is a
+critical constraint: any router whose overhead exceeds 6.2\,ms will make
+pruning net-negative on a 1B model (Section~\ref{sec:lmhead-fraction}).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\columnwidth]{../results/baseline_profile.png}
+\caption{Baseline decode step profiling: per-operation time breakdown.}
+\label{fig:baseline}
+\end{figure}
+
+\subsection{Token Acceptance Rate vs.\ K}
+
+Acceptance rate is the fraction of decoding steps where the ground-truth next
+token falls within the pruned shortlist (Table~\ref{tab:acceptance}).
+
+\begin{table*}[t]
+\centering
+\caption{Token acceptance rate (\%) vs.\ shortlist size $K$ for all routers.}
+\label{tab:acceptance}
+\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\tblhead{Router} & \tblhead{K=512} & \tblhead{K=1k} & \tblhead{K=2k} & \tblhead{K=5k} & \tblhead{K=10k} \\
+\midrule
+Static Top-K         & 0.13 & 0.28 & 0.53 & 2.4  & 7.6  \\
+Cluster              & 32.3 & 52.8 & 66.2 & 74.5 & 81.3 \\
+Cosine               & 98.3 & 98.3 & 98.3 & 98.3 & 98.3 \\
+Dual-Encoder (step)  & 99.5 & 99.5 & 99.5 & 99.5 & 99.5 \\
+MLP Graph            & 99.9 & 99.9 & 99.9 & 99.9 & 99.9 \\
+Attention Graph      & 83.6 & 99.7 & 99.7 & 99.7 & 99.7 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Key observations: Static Top-K is near-random ($<$8\% at K=10k). Cluster
+saturates at 81\% --- 19\% of correct tokens live in unselected clusters.
+Cosine acceptance is flat at 98.3\% across all $K$ values, indicating the
+router reaches its information-theoretic ceiling early. Dual-Encoder (step)
+and MLP Graph achieve the highest acceptance (99.5\% and 99.9\% respectively),
+essentially independent of $K$ above 512.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{../results/acceptance_rate_vs_k.png}
+\caption{Token acceptance rate vs.\ shortlist size $K$ for all routers.}
+\label{fig:acceptance}
+\end{figure*}
+
+\subsection{Perplexity Degradation vs.\ K}
+
+$\Delta\text{PPL} = \text{PPL}_{\text{pruned}} - \text{PPL}_{\text{baseline}}$;
+baseline PPL = 26.26 (Table~\ref{tab:ppl}).
+
+\begin{table*}[t]
+\centering
+\caption{Perplexity degradation ($\Delta$PPL) vs.\ shortlist size $K$.
+         Static Top-K and Cluster omitted due to extreme values
+         ($\Delta$PPL $> 10^6$).}
+\label{tab:ppl}
+\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\tblhead{Router} & \tblhead{K=512} & \tblhead{K=1k} & \tblhead{K=2k} & \tblhead{K=5k} & \tblhead{K=10k} \\
+\midrule
+Cosine                          & +18.93 & +10.71 & +6.77 & +3.52 & \textbf{+2.71} \\
+Dual-Encoder (step)             & +24.25 & +8.83  & +3.91 & +1.67 & \textbf{+1.01} \\
+Dual-Encoder (prefetch+refresh)\textsuperscript{$\dagger$} & --- & --- & --- & +146.2 & --- \\
+MLP Graph                       & +40.19 & +13.28 & +6.37 & +2.87 & \textbf{+2.09} \\
+Attention Graph                 & +15031 & +21.57 & +5.63 & +2.07 & \textbf{+1.30} \\
+\bottomrule
+\multicolumn{6}{l}{\footnotesize $\dagger$ Prefetch+refresh uses a fixed
+  effective $K{\approx}4{,}635$ averaged over the evaluation.}
+\end{tabular}
+\end{table*}
+
+At K=10k the three best methods cluster closely: DE step (+1.01), Attention
+Graph (+1.30), MLP Graph (+2.09), and Cosine (+2.71) --- all within 11\% of
+baseline PPL. DE step at K=5k achieves $\Delta$PPL=+1.67 with a 96.1\%
+memory bandwidth reduction.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{../results/ppl_degradation_vs_k.png}
+\caption{Perplexity degradation ($\Delta$PPL) vs.\ shortlist size $K$.
+         Static Top-K and Cluster are omitted due to extreme values.}
+\label{fig:ppl}
+\end{figure*}
+
+\subsection{Tokens/sec vs.\ K}
+
+Wall-clock throughput on MPS. Baseline = 22.80\,tok/s. \textbf{All pruned
+methods are slower than baseline} due to router overhead exceeding
+\code{lm\_head} savings (Table~\ref{tab:throughput}).
+
+\begin{table*}[t]
+\centering
+\caption{Wall-clock throughput (tok/s) vs.\ shortlist size $K$.
+         Baseline = 22.80\,tok/s.}
+\label{tab:throughput}
+\small
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+\tblhead{Router} & \tblhead{K=512} & \tblhead{K=1k} & \tblhead{K=2k} & \tblhead{K=5k} & \tblhead{K=10k} & \tblhead{vs.\ baseline} \\
+\midrule
+\textbf{Baseline} & --- & --- & --- & --- & 22.80 & --- \\
+Static Top-K      & 20.95 & 20.36 & 18.70 & 17.52 & 18.14 & $-8\%$ to $-23\%$ \\
+Cluster           & 21.71 & 18.16 & 20.81 & 18.88 & 17.91 & $-5\%$ to $-21\%$ \\
+Cosine            & 16.91 & 14.79 & 14.30 & 13.99 & 13.61 & $-26\%$ to $-40\%$ \\
+DE (prefetch+refresh) & --- & --- & --- & 18.26 & --- & $-20\%$ \\
+Dual-Encoder (step)   & 15.81 & 15.63 & 15.16 & 13.88 & 13.17 & $-31\%$ to $-42\%$ \\
+MLP Graph         & 12.17 & 12.11 & 12.00 & 11.10 & 10.95 & $-47\%$ to $-52\%$ \\
+Attention Graph   & 9.13  &  6.04 &  5.98 &  5.79 &  6.07 & $-60\%$ to $-75\%$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The throughput ordering directly reflects router overhead: Cluster and Static
+Top-K add small overhead (no neural network forward pass), while Attention
+Graph --- which requires re-running eager attention to extract attention
+patterns --- runs at 3.8$\times$ slower than baseline.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{../results/throughput_vs_k.png}
+\caption{Wall-clock tokens/sec vs.\ shortlist size $K$.
+         Dashed line = full-vocab baseline (22.80\,tok/s).}
+\label{fig:throughput}
+\end{figure*}
+
+\subsection{Pareto Frontier: Quality vs.\ Speed}
+
+The accuracy--throughput Pareto frontier is defined by methods that are not
+dominated --- no other configuration achieves both higher throughput and lower
+PPL degradation simultaneously. On MPS the baseline (22.80\,tok/s,
+$\Delta\text{PPL}=0$) is not dominated by any pruned method.
+
+\begin{table}[h]
+\centering
+\caption{Approximate Pareto frontier among pruned methods.}
+\label{tab:pareto}
+\small
+\begin{tabular}{@{}llrrl@{}}
+\toprule
+\tblhead{Method} & \tblhead{K} & \tblhead{Tok/s} & \tblhead{$\Delta$PPL} & \tblhead{Note} \\
+\midrule
+Cluster     & 512   & 21.71 & $+19\text{M}$ & Quality unusable \\
+DE (prefetch) & 4635 & 18.26 & $+146$ & Better speed \\
+Cosine      & 10k  & 13.61 & $+2.71$ & Competitive \\
+\textbf{DE (step)} & \textbf{5k} & \textbf{13.88} & \textbf{+1.67} & \textbf{Best trade-off} \\
+DE (step)   & 10k  & 13.17 & $+1.01$ & Marginal PPL gain \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The Dual-Encoder (step) at K=5k represents the recommended operating point for
+quality-sensitive workloads: lowest perplexity degradation among methods with
+$\geq$98\% memory bandwidth reduction, at 13.88\,tok/s.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\columnwidth]{../results/pareto_frontier.png}
+\caption{Pareto frontier: throughput vs.\ $\Delta$PPL. Points toward the
+  top-left are preferred. Full-vocab baseline sits at the optimal top-left
+  corner.}
+\label{fig:pareto}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\columnwidth]{../results/shortlist_growth.png}
+\caption{Mean shortlist size growth vs.\ $K$ (DE prefetch+refresh variant).}
+\label{fig:shortlist}
+\end{figure}
+
+\subsection{Graph-Based Routers}
+
+\textbf{MLP Transition Graph.} A directed graph over vocabulary tokens where
+edge weights encode how frequently token $v$ follows token $u$ in training.
+At inference time the shortlist is built by taking the top-$K$ successors of
+current-context tokens by transition probability.
+\begin{itemize}[leftmargin=*, itemsep=0pt, topsep=2pt]
+  \item Acceptance rate: 99.9\% across all $K$ --- the highest of any method.
+  \item Throughput: 10.95--12.17\,tok/s --- graph traversal and sparse index
+        operations add 38--48\,ms overhead per step.
+  \item PPL at K=10k: +2.09.
+\end{itemize}
+
+\textbf{Attention Graph.} Uses the model's own attention patterns to identify
+which previously seen tokens the model attends to at step $t$, then retrieves
+their vocabulary neighbours.
+\begin{itemize}[leftmargin=*, itemsep=0pt, topsep=2pt]
+  \item Acceptance at $K \geq 1$k: 99.7\%.
+  \item Throughput: 5.79--9.13\,tok/s --- \code{output\_attentions=True}
+        forces eager attention, disabling FlashAttention and adding
+        ${\sim}$115\,ms overhead per step.
+  \item PPL at K=10k: +1.30 --- second-best quality result after DE step.
+\end{itemize}
+
+\subsection{Speculative Decoding via Retrieval}
+
+Two speculative decoding approaches were implemented and benchmarked.
+
+\subsubsection{Chain-based (v1)}
+Token 1 selected from the combined Attn+Graph shortlist argmax; tokens 2..D
+from a 1-hop graph walk. The full model runs two forward passes per step, and
+\code{output\_attentions=True} forces eager attention throughout.
+
+\begin{table}[h]
+\centering
+\caption{Chain-based speculative decoding results.}
+\label{tab:spec-v1}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\tblhead{Config} & \tblhead{Tok/s} & \tblhead{Draft acc.} & \tblhead{Speedup} \\
+\midrule
+Cosine ($D{=}4$)          & 1.79  & 28.0\% & $0.08{\times}$ \\
+Attn+Graph ($D{=}4$)      & 1.43  & 28.4\% & $0.06{\times}$ \\
+\textbf{Full-vocab baseline} & \textbf{22.80} & --- & \textbf{1.0×} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At 1.43--1.79\,tok/s this is 6--8\% of baseline. Two compounding factors:
+(1) two full forward passes per step with no parallelism gain; (2)
+\code{output\_attentions=True} adding ${\sim}$115\,ms eager-attention overhead.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\columnwidth]{../results/speculative_decoding_sweep.png}
+\caption{Speculative decoding (chain-based v1): effective tok/s and draft
+  acceptance rate vs.\ draft length $D$.}
+\label{fig:spec-v1}
+\end{figure}
+
+\subsubsection{Retrieval-based (v2)}
+An offline index of 50k completion sequences (8 tokens each) is built by
+extracting $h_T$ at split points across WikiText-2 training windows. At
+inference time: (1) one probe forward pass with KV-cache captures $h_T$;
+(2) top-$K$ completions retrieved by cosine similarity; (3) each candidate
+verified using the cached KV-cache --- $O(D)$ attention cost instead of
+$O(T+D)$. No \code{output\_attentions}; standard SDPA throughout.
+
+\begin{table}[h]
+\centering
+\caption{Retrieval-based speculative decoding (v2) sweep results.}
+\label{tab:spec-v2}
+\small
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+\tblhead{K} & \tblhead{D} & \tblhead{Tok/s} & \tblhead{Tok/step} & \tblhead{Draft acc.} & \tblhead{Speedup} \\
+\midrule
+4 &  4 & 2.25 & 1.18 & 1.1\% & $0.10{\times}$ \\
+4 &  8 & 2.03 & 1.12 & 0.4\% & $0.09{\times}$ \\
+4 & 16 & 2.00 & 1.12 & 0.2\% & $0.09{\times}$ \\
+8 &  4 & 1.74 & 1.26 & 0.8\% & $0.08{\times}$ \\
+8 &  8 & 1.62 & 1.22 & 0.4\% & $0.07{\times}$ \\
+8 & 16 & 1.50 & 1.21 & 0.2\% & $0.07{\times}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The KV-cache fix eliminated the $O(T^2)$ quadratic cost from v1, improving
+throughput to 1.5--2.3\,tok/s. However, draft acceptance rates collapsed to
+\textbf{0.2--1.1\%} --- far below the ${\sim}$70--80\% needed for speculative
+speedup. The root cause is a \textbf{retrieval signal mismatch}: the index
+embeds prefix hidden states from an offline training-data pass, while at
+inference time $h_T$ is a function of the full prompt history. The dot-product
+similarity is insufficient to recover semantically valid continuations, so
+nearly every draft token is rejected. The retrieval signal needs to be
+\emph{discriminatively trained}, not borrowed from the LLM's general-purpose
+representation.
+
+\subsection{Cost Analysis}
+
+Using GPU on-demand pricing (A100 @ \$3.00/hr = \$0.000833/s):
+
+\begin{table}[h]
+\centering
+\caption{Cost per 1M tokens at A100 on-demand pricing.}
+\label{tab:cost}
+\small
+\begin{tabular}{@{}llrrl@{}}
+\toprule
+\tblhead{Method} & \tblhead{K} & \tblhead{Tok/s} & \tblhead{\$/1M tok} & \tblhead{vs.\ base} \\
+\midrule
+\textbf{Baseline} & 128k & 22.80 & \$36.56 & --- \\
+Cosine       & 10k & 13.61 & \$61.24  & $+68\%$ \\
+DE (step)    &  2k & 15.16 & \$54.96  & $+50\%$ \\
+DE (step)    &  5k & 13.88 & \$60.04  & $+64\%$ \\
+DE (step)    & 10k & 13.17 & \$63.30  & $+73\%$ \\
+MLP Graph    & 10k & 10.95 & \$76.09  & $+108\%$ \\
+Attn Graph   & 10k &  6.07 & \$137.38 & $+276\%$ \\
+Spec (v1)    & D=4 &  1.43 & $\sim$\$582 & $+1{,}492\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All pruned methods increase cost per token on a 1B model. Break-even requires
+the \code{lm\_head} fraction to exceed the router overhead fraction ---
+approximately 65\% on a 1B model vs.\ measured 14.1\%. At 70B scale, step
+time ${\approx}$1,200\,ms and break-even drops to ${\sim}$2.4\%, well within
+reach.
+
+% ────────────────────────────────────────────────────────────
+\section{Discussion}
+% ────────────────────────────────────────────────────────────
+
+\subsection{The Blind-Spot Risk}
+
+Dynamic vocabulary pruning introduces a fundamental tension: the router can
+only shortlist tokens it predicts are relevant, but creative or unexpected
+tokens by definition have low prior probability given context. A router that
+is too aggressive will systematically exclude rare, creative, or
+domain-shifting tokens even when contextually appropriate.
+
+Our results directly quantify this risk. DE (step) achieves 99.5\% acceptance
+at all $K$ values from 512 to 10k --- meaning the correct token is in the
+shortlist 99.5\% of steps regardless of $K$. The limiting factor is not
+shortlist size but which embedding-space neighbours the router retrieves: the
+0.5\% of missed tokens are systematically hard cases (rare tokens, domain
+shifts) that the router misses at any $K$.
+
+\subsection{Limitations}
+
+\begin{itemize}[leftmargin=*, itemsep=1pt, topsep=2pt]
+  \item Evaluation limited to a single 1B model and a single dataset
+        (WikiText-2 English prose).
+  \item All latency measurements on MPS (Apple Silicon); CUDA results pending.
+  \item The dual-encoder is trained on token-level prediction; it may not
+        generalise to multi-token idiomatic phrases or specialised domains
+        (code, mathematics, non-English text).
+  \item Router training uses only WikiText-2; domain mismatch could reduce
+        acceptance rates.
+\end{itemize}
+
+\subsection{The \texttt{lm\_head} Fraction Problem}
+\label{sec:lmhead-fraction}
+
+The core finding --- that vocabulary pruning does not improve throughput on a
+1B model --- follows directly from arithmetic:
+\begin{align*}
+  \text{lm\_head saving} &= 43.9\,\text{ms} \times 0.141 \times 0.922 = 5.7\,\text{ms} \\
+  \text{Router overhead (DE, K=10k)} &= 26.4\,\text{ms} \\
+  \text{Net:} &\;{+}20.7\,\text{ms/step} \;\Rightarrow\; {-}42\%\;\text{throughput}
+\end{align*}
+For pruning to be net-positive, the \code{lm\_head} fraction must exceed:
+\begin{equation}
+  f_{\text{break-even}} =
+  \frac{\text{router\_overhead\_ms}}{\text{step\_ms} \times (1 - K/V)}
+\end{equation}
+On this 1B model, break-even requires $f \approx 65\%$; measured value is
+14.1\%. At 70B scale (step $\approx$1,200\,ms), break-even drops to
+${\sim}$2.4\% --- well below the expected \code{lm\_head} fraction.
+
+Importantly, the \textbf{memory bandwidth saving} is real at all scales.
+Reducing \code{lm\_head} traffic by 92\% matters for edge deployment (models
+that barely fit in VRAM) and for batched inference where memory bandwidth is
+the binding resource.
+
+\subsection{Speculative Decoding via Retrieval}
+
+Two implementations were evaluated. The chain-based v1 achieved 28\% draft
+acceptance while penalised by two full forward passes per step and eager
+attention overhead. The retrieval-based v2 eliminated both overhead sources
+via KV-cache reuse and standard SDPA, but draft acceptance collapsed to
+0.2--1.1\%. Key factors:
+
+\begin{enumerate}[leftmargin=*, itemsep=1pt, topsep=2pt]
+  \item \textbf{Retrieval signal mismatch.} Index embeddings are from
+        offline training-data prefixes; inference-time $h_T$ differs
+        systematically. Cosine similarity is low-signal for valid continuations.
+  \item \textbf{No discriminative training.} The index uses general-purpose
+        LLM representations, not representations trained to distinguish
+        accepted from rejected draft sequences.
+  \item \textbf{Sequential verifier passes.} A tree-structured verifier pass
+        over all $K$ candidates in a single batched forward pass (Option C)
+        would reduce per-step cost from $O(K \cdot D)$ to $O(D)$.
+\end{enumerate}
+
+The underlying architecture --- retrieval of completion sequences, KV-cache
+reuse in the verifier, standard SDPA --- is sound. The missing ingredient is a
+discriminatively trained retrieval model.
+
+% ────────────────────────────────────────────────────────────
+\section{Conclusion and Future Work}
+% ────────────────────────────────────────────────────────────
+
+We implemented and benchmarked six vocabulary pruning strategies and two
+retrieval-based speculative decoders against a full-vocabulary baseline on
+\code{Llama-3.2-1B-Instruct} and WikiText-2.
+
+\textbf{The memory bandwidth result is the genuine contribution.} Pruning
+\code{lm\_head} to K=10k reduces the weight matrix loaded per step from
+525\,MB to 41\,MB --- a 92.2\% reduction --- while DE (step) at K=5k keeps
+$\Delta$PPL to +1.67 above the 26.26 baseline.
+
+\textbf{The throughput result is an honest negative.} On a 1B model on MPS,
+the \code{lm\_head} fraction is only 14.1\%. Every router tested adds more
+overhead than it saves. Break-even requires a much larger model (70B+) or a
+GPU-native router kernel reducing overhead below ${\sim}$2\,ms.
+
+\textbf{Speculative decoding via retrieval} was evaluated in two
+implementations. The chain-based v1 achieved 1.43\,tok/s (6\% of baseline)
+with 28\% draft acceptance. The retrieval-based v2 removed both overhead
+sources but draft acceptance collapsed to 0.2--1.1\% due to retrieval signal
+mismatch. A useful retrieval-based speculative decoder requires a
+\emph{discriminatively trained} retrieval model.
+
+\textbf{Future work:}
+\begin{itemize}[leftmargin=*, itemsep=1pt, topsep=2pt]
+  \item \textbf{GPU benchmarks.} Reproduce all results on NVIDIA A10G/A100
+        to validate whether the overhead balance shifts at CUDA speeds.
+  \item \textbf{GPU-native router kernel.} Implement the DE router as a fused
+        CUDA kernel to reduce overhead from ${\sim}$26\,ms to $<$2\,ms.
+  \item \textbf{INSTRUCTOR-style router.} Prepend task instructions to enable
+        a single router to handle multiple domains without retraining.
+  \item \textbf{Discriminative retrieval for speculative decoding.} Train a
+        contrastive retrieval model on accepted vs.\ rejected draft sequences.
+        Combined with a compact Medusa head for verification, this is the most
+        promising path to retrieval-based speculative speedup.
+  \item \textbf{Online router adaptation.} Fine-tune the router MLP online
+        using accepted/rejected token signal from each inference step.
+  \item \textbf{Larger model evaluation.} Test 8B and 70B Llama-3.1
+        checkpoints, where the \code{lm\_head} fraction is expected to be
+        higher and router overhead is proportionally smaller.
+\end{itemize}
+
+% ────────────────────────────────────────────────────────────
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+
+\bibitem{cai2024}
+T.~Cai et al.
+\newblock Medusa: Simple LLM inference acceleration framework with multiple
+  decoding heads.
+\newblock 2024.
+
+\bibitem{chen2023}
+C.~Chen et al.
+\newblock Accelerating large language model decoding with speculative sampling.
+\newblock 2023.
+
+\bibitem{henderson2017}
+M.~Henderson et al.
+\newblock Efficient natural language response suggestion for smart reply.
+\newblock 2017.
+
+\bibitem{karpukhin2020}
+V.~Karpukhin et al.
+\newblock Dense passage retrieval for open-domain question answering.
+\newblock In \emph{EMNLP}, 2020.
+
+\bibitem{leviathan2023}
+Y.~Leviathan, M.~Kalman, and Y.~Matias.
+\newblock Fast inference from transformers via speculative decoding.
+\newblock In \emph{ICML}, 2023.
+
+\bibitem{merity2016}
+S.~Merity et al.
+\newblock Pointer sentinel mixture models.
+\newblock 2016. (WikiText-2 dataset)
+
+\bibitem{su2022}
+H.~Su et al.
+\newblock One embedder, any task: Instruction-finetuned text embeddings.
+\newblock 2022.
+
+\end{thebibliography}
+
+\end{document}
