@@ -80,8 +80,7 @@
 }
 \author{%
   \normalsize
-  Working draft --- MPS results complete; GPU benchmarks pending\\[2pt]
-  \small\textit{March 2026}
+  GPU benchmarks complete --- March 2026%
 }
 \date{}
 
@@ -110,10 +109,11 @@ model's hidden state to a query vector, then retrieve the top-$K$ token
 candidates by nearest-neighbour search over a pre-indexed corpus of sentence
 completions. We benchmark four routing strategies against a full-vocabulary
 baseline on WikiText-2 (\code{Llama-3.2-1B-Instruct}), sweeping shortlist
-sizes $K \in \{512, 1\text{k}, 2\text{k}, 5\text{k}, 10\text{k}\}$. The
-primary demonstrated gain is a 92--99.6\% reduction in \code{lm\_head} memory
-bandwidth. Wall-clock speedup requires GPU-native kernels or larger models
-(70B+) where the memory-bound regime is more pronounced.
+sizes $K \in \{512, 1\text{k}, 2\text{k}, 5\text{k}, 10\text{k}\}$. On an
+NVIDIA T4 GPU the \code{lm\_head} accounts for 6.1\% of per-token latency;
+the primary demonstrated gain is a 92--99.6\% reduction in \code{lm\_head}
+memory bandwidth. Wall-clock speedup requires GPU-native kernels or larger
+models (70B+) where the memory-bound regime is more pronounced.
 \end{abstract}
 
 % ────────────────────────────────────────────────────────────
@@ -139,6 +139,10 @@ Within each step of this loop, the two most expensive operations are:
 On CPU and Apple Silicon (MPS) --- where memory bandwidth rather than raw
 FLOP throughput is the binding constraint --- the \code{lm\_head} matrix
 multiplication can account for a disproportionate share of per-token latency.
+At batch size~1 --- the regime of interactive and agentic inference --- the
+\code{lm\_head} projection is memory-bandwidth-bound: the arithmetic intensity
+is too low to keep the GPU's compute units saturated, so the bottleneck is the
+rate at which the weight matrix can be read from VRAM.
 
 \subsection{The Wasted Computation Insight}
 
@@ -153,7 +157,7 @@ vocabulary region is relevant before the full projection is run?}
 
 \begin{enumerate}[leftmargin=*, itemsep=0pt, topsep=2pt]
   \item \textbf{Profiling.} We quantify the \code{lm\_head} fraction of
-        per-token latency for a 1B open-source LLM on MPS hardware.
+        per-token latency for a 1B open-source LLM on an NVIDIA T4 GPU.
   \item \textbf{Router taxonomy.} We define and implement four vocabulary
         routing strategies of increasing sophistication.
   \item \textbf{Dual-Encoder Router.} A lightweight MLP trained with MNRL
@@ -297,8 +301,7 @@ with highest $\cos(q_t, W_V[v,:])$ via brute-force matmul.
 
 \subsection{Model}
 \code{meta-llama/Llama-3.2-1B-Instruct} --- 1B parameters, 2048-dim hidden
-state, 128,256-token vocabulary, 16 transformer layers, \code{bfloat16},
-running on Apple Silicon (MPS).
+state, 128,256-token vocabulary, 16 transformer layers, \code{bfloat16}.
 
 \subsection{Dataset}
 \textbf{WikiText-2-raw-v1}~\cite{merity2016}: standard language modelling
@@ -308,9 +311,8 @@ benchmark; plain English prose. Router training: \code{train} split
 passages of 128 tokens from the \code{validation} split.
 
 \subsection{Hardware}
-Apple M-series chip, MPS backend, 16\,GB unified memory, model in
-\code{bfloat16}. All latency measurements taken after a 5-step warm-up;
-reported as mean over 50 prompts.
+NVIDIA T4 GPU (16\,GB VRAM), CUDA backend, \code{bfloat16}. All latency
+measurements taken after a 5-step warm-up; reported as mean over 50 prompts.
 
 \subsection{Evaluation Metrics}
 
@@ -330,7 +332,7 @@ reported as mean over 50 prompts.
 \section{Results}
 % ────────────────────────────────────────────────────────────
 
-All experiments: Apple Silicon (MPS), \code{bfloat16},
+All experiments: NVIDIA T4 GPU, CUDA, \code{bfloat16},
 \code{Llama-3.2-1B-Instruct}. Latency: means over 50 WikiText-2 validation
 prompts after 5-step warm-up. Perplexity: full WikiText-2 test split.
 
@@ -338,25 +340,25 @@ prompts after 5-step warm-up. Perplexity: full WikiText-2 test split.
 
 \begin{table}[h]
 \centering
-\caption{Full-vocabulary baseline measurements.}
+\caption{Full-vocabulary baseline measurements (NVIDIA T4 GPU).}
 \label{tab:baseline}
 \small
 \begin{tabular}{@{}lr@{}}
 \toprule
 \tblhead{Metric} & \tblhead{Value} \\
 \midrule
-Tokens/sec (full vocab)        & \textbf{22.80} \\
-Mean step time                 & 43.9\,ms \\
-\code{lm\_head} time (mean)    & 6.2\,ms \\
-\code{lm\_head} time \%        & \textbf{14.1\%} \\
-Baseline perplexity (WikiText-2 test) & \textbf{26.26} \\
+Tokens/sec (full vocab)        & \textbf{26.60} \\
+Mean step time                 & 37.60\,ms \\
+\code{lm\_head} time (mean)    & 2.30\,ms \\
+\code{lm\_head} time \%        & \textbf{6.1\%} \\
+Baseline perplexity (WikiText-2 test) & \textbf{26.24} \\
 \code{lm\_head} weight matrix  & 525\,MB \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The \code{lm\_head} accounts for only 14.1\% of per-token latency. This is a
-critical constraint: any router whose overhead exceeds 6.2\,ms will make
+The \code{lm\_head} accounts for only 6.1\% of per-token latency. This is a
+critical constraint: any router whose overhead exceeds 2.30\,ms will make
 pruning net-negative on a 1B model (Section~\ref{sec:lmhead-fraction}).
 
 \begin{figure}[H]
@@ -380,22 +382,22 @@ token falls within the pruned shortlist (Table~\ref{tab:acceptance}).
 \toprule
 \tblhead{Router} & \tblhead{K=512} & \tblhead{K=1k} & \tblhead{K=2k} & \tblhead{K=5k} & \tblhead{K=10k} \\
 \midrule
-Static Top-K         & 0.13 & 0.28 & 0.53 & 2.4  & 7.6  \\
-Cluster              & 32.3 & 52.8 & 66.2 & 74.5 & 81.3 \\
-Cosine               & 98.3 & 98.3 & 98.3 & 98.3 & 98.3 \\
+Static Top-K         & 0.09 & 0.25 & 0.50 & 2.5  & 7.7  \\
+Cluster              & 33.8 & 54.8 & 68.1 & 76.6 & 83.3 \\
+Cosine               & 98.4 & 98.4 & 98.4 & 98.4 & 98.4 \\
 Dual-Encoder (step)  & 99.5 & 99.5 & 99.5 & 99.5 & 99.5 \\
-MLP Graph            & 99.9 & 99.9 & 99.9 & 99.9 & 99.9 \\
-Attention Graph      & 83.6 & 99.7 & 99.7 & 99.7 & 99.7 \\
+MLP Graph            & 99.9 & 100.0 & 100.0 & 100.0 & 100.0 \\
+Attention Graph      & 82.7 & 99.8 & 99.8 & 99.8 & 99.8 \\
 \bottomrule
 \end{tabular}
 \end{table*}
 
 Key observations: Static Top-K is near-random ($<$8\% at K=10k). Cluster
-saturates at 81\% --- 19\% of correct tokens live in unselected clusters.
-Cosine acceptance is flat at 98.3\% across all $K$ values, indicating the
+saturates at 83\% --- 17\% of correct tokens live in unselected clusters.
+Cosine acceptance is flat at 98.4\% across all $K$ values, indicating the
 router reaches its information-theoretic ceiling early. Dual-Encoder (step)
-and MLP Graph achieve the highest acceptance (99.5\% and 99.9\% respectively),
-essentially independent of $K$ above 512.
+and MLP Graph achieve the highest acceptance (99.5\% and $\geq$99.9\%
+respectively), essentially independent of $K$ above 512.
 
 \begin{figure*}[t]
 \centering
@@ -407,7 +409,7 @@ essentially independent of $K$ above 512.
 \subsection{Perplexity Degradation vs.\ K}
 
 $\Delta\text{PPL} = \text{PPL}_{\text{pruned}} - \text{PPL}_{\text{baseline}}$;
-baseline PPL = 26.26 (Table~\ref{tab:ppl}).
+baseline PPL = 26.24 (Table~\ref{tab:ppl}).
 
 \begin{table*}[t]
 \centering
@@ -420,20 +422,20 @@ baseline PPL = 26.26 (Table~\ref{tab:ppl}).
 \toprule
 \tblhead{Router} & \tblhead{K=512} & \tblhead{K=1k} & \tblhead{K=2k} & \tblhead{K=5k} & \tblhead{K=10k} \\
 \midrule
-Cosine                          & +18.93 & +10.71 & +6.77 & +3.52 & \textbf{+2.71} \\
-Dual-Encoder (step)             & +24.25 & +8.83  & +3.91 & +1.67 & \textbf{+1.01} \\
-Dual-Encoder (prefetch+refresh)\textsuperscript{$\dagger$} & --- & --- & --- & +146.2 & --- \\
-MLP Graph                       & +40.19 & +13.28 & +6.37 & +2.87 & \textbf{+2.09} \\
-Attention Graph                 & +15031 & +21.57 & +5.63 & +2.07 & \textbf{+1.30} \\
+Cosine                          & +19.00 & +10.83 & +6.79 & +3.54 & \textbf{+2.73} \\
+Dual-Encoder (step)             & +24.64 & +8.95  & +3.93 & +1.68 & \textbf{+1.03} \\
+Dual-Encoder (prefetch+refresh)\textsuperscript{$\dagger$} & --- & --- & --- & +146.15 & --- \\
+MLP Graph                       & +39.59 & +13.22 & +6.39 & +2.89 & \textbf{+2.11} \\
+Attention Graph                 & +15025 & +21.58 & +5.91 & +2.10 & \textbf{+1.33} \\
 \bottomrule
 \multicolumn{6}{l}{\footnotesize $\dagger$ Prefetch+refresh uses a fixed
-  effective $K{\approx}4{,}635$ averaged over the evaluation.}
+  effective $K{\approx}4{,}634$ averaged over the evaluation.}
 \end{tabular}
 \end{table*}
 
-At K=10k the three best methods cluster closely: DE step (+1.01), Attention
-Graph (+1.30), MLP Graph (+2.09), and Cosine (+2.71) --- all within 11\% of
-baseline PPL. DE step at K=5k achieves $\Delta$PPL=+1.67 with a 96.1\%
+At K=10k the three best methods cluster closely: DE step (+1.03), Attention
+Graph (+1.33), MLP Graph (+2.11), and Cosine (+2.73) --- all within 11\% of
+baseline PPL. DE step at K=5k achieves $\Delta$PPL=+1.68 with a 96.1\%
 memory bandwidth reduction.
 
 \begin{figure*}[t]
@@ -446,73 +448,78 @@ memory bandwidth reduction.
 
 \subsection{Tokens/sec vs.\ K}
 
-Wall-clock throughput on MPS. Baseline = 22.80\,tok/s. \textbf{All pruned
-methods are slower than baseline} due to router overhead exceeding
-\code{lm\_head} savings (Table~\ref{tab:throughput}).
+Wall-clock throughput on an NVIDIA T4 GPU. Baseline = 26.60\,tok/s
+(Table~\ref{tab:throughput}).
 
 \begin{table*}[t]
 \centering
 \caption{Wall-clock throughput (tok/s) vs.\ shortlist size $K$.
-         Baseline = 22.80\,tok/s.}
+         Baseline = 26.60\,tok/s (NVIDIA T4 GPU).}
 \label{tab:throughput}
 \small
 \begin{tabular}{@{}lrrrrrr@{}}
 \toprule
 \tblhead{Router} & \tblhead{K=512} & \tblhead{K=1k} & \tblhead{K=2k} & \tblhead{K=5k} & \tblhead{K=10k} & \tblhead{vs.\ baseline} \\
 \midrule
-\textbf{Baseline} & --- & --- & --- & --- & 22.80 & --- \\
-Static Top-K      & 20.95 & 20.36 & 18.70 & 17.52 & 18.14 & $-8\%$ to $-23\%$ \\
-Cluster           & 21.71 & 18.16 & 20.81 & 18.88 & 17.91 & $-5\%$ to $-21\%$ \\
-Cosine            & 16.91 & 14.79 & 14.30 & 13.99 & 13.61 & $-26\%$ to $-40\%$ \\
-DE (prefetch+refresh) & --- & --- & --- & 18.26 & --- & $-20\%$ \\
-Dual-Encoder (step)   & 15.81 & 15.63 & 15.16 & 13.88 & 13.17 & $-31\%$ to $-42\%$ \\
-MLP Graph         & 12.17 & 12.11 & 12.00 & 11.10 & 10.95 & $-47\%$ to $-52\%$ \\
-Attention Graph   & 9.13  &  6.04 &  5.98 &  5.79 &  6.07 & $-60\%$ to $-75\%$ \\
+\textbf{Baseline} & --- & --- & --- & --- & 26.60 & --- \\
+Static Top-K      & 26.07 & 26.40 & 26.36 & 26.82 & 26.70 & $-1\%$ to $+1\%$ \\
+Cluster           & 24.34 & 24.18 & 24.25 & 24.27 & 23.99 & $-9\%$ to $-10\%$ \\
+Cosine            & 24.27 & 24.17 & 23.77 & 23.51 & 23.72 & $-9\%$ to $-12\%$ \\
+DE (prefetch+refresh) & --- & --- & --- & \textbf{27.67} & --- & $\mathbf{+4\%}$ \\
+Dual-Encoder (step)   & 23.27 & 22.97 & 23.20 & 23.16 & 22.39 & $-13\%$ to $-16\%$ \\
+MLP Graph         & 24.28 & 24.31 & 23.81 & 22.89 & 22.83 & $-14\%$ to $-16\%$ \\
+Attention Graph   & 22.72 & 20.71 & 21.30 & 20.12 & 19.98 & $-15\%$ to $-25\%$ \\
 \bottomrule
 \end{tabular}
 \end{table*}
 
-The throughput ordering directly reflects router overhead: Cluster and Static
-Top-K add small overhead (no neural network forward pass), while Attention
-Graph --- which requires re-running eager attention to extract attention
-patterns --- runs at 3.8$\times$ slower than baseline.
+On GPU the throughput gap between pruned methods and baseline is much narrower
+than on memory-limited hardware. Static Top-K adds negligible overhead (no
+neural network pass), sitting within $\pm$1\% of baseline. The DE
+(prefetch+refresh) variant is the only pruned method to exceed baseline
+throughput (+4\%, 27.67\,tok/s), by amortising router cost across many
+decoding steps --- though at a severe quality penalty (+146 PPL). Attention
+Graph remains the worst due to \code{output\_attentions=True} forcing eager
+attention, but the penalty ($-15\%$ to $-25\%$) is far smaller than on
+memory-bandwidth-limited hardware.
 
 \begin{figure*}[t]
 \centering
 \includegraphics[width=\textwidth]{../results/throughput_vs_k.png}
 \caption{Wall-clock tokens/sec vs.\ shortlist size $K$.
-         Dashed line = full-vocab baseline (22.80\,tok/s).}
+         Dashed line = full-vocab baseline (26.60\,tok/s, NVIDIA T4 GPU).}
 \label{fig:throughput}
 \end{figure*}
 
 \subsection{Pareto Frontier: Quality vs.\ Speed}
 
-The accuracy--throughput Pareto frontier is defined by methods that are not
+The accuracy--throughput Pareto frontier identifies configurations not
 dominated --- no other configuration achieves both higher throughput and lower
-PPL degradation simultaneously. On MPS the baseline (22.80\,tok/s,
-$\Delta\text{PPL}=0$) is not dominated by any pruned method.
+PPL degradation simultaneously.
 
 \begin{table}[h]
 \centering
-\caption{Approximate Pareto frontier among pruned methods.}
+\caption{Approximate Pareto frontier among pruned methods (T4 GPU).}
 \label{tab:pareto}
 \small
 \begin{tabular}{@{}llrrl@{}}
 \toprule
 \tblhead{Method} & \tblhead{K} & \tblhead{Tok/s} & \tblhead{$\Delta$PPL} & \tblhead{Note} \\
 \midrule
-Cluster     & 512   & 21.71 & $+19\text{M}$ & Quality unusable \\
-DE (prefetch) & 4635 & 18.26 & $+146$ & Better speed \\
-Cosine      & 10k  & 13.61 & $+2.71$ & Competitive \\
-\textbf{DE (step)} & \textbf{5k} & \textbf{13.88} & \textbf{+1.67} & \textbf{Best trade-off} \\
-DE (step)   & 10k  & 13.17 & $+1.01$ & Marginal PPL gain \\
+DE (prefetch) & 4634 & 27.67 & $+146$ & Fastest; quality unusable \\
+Cluster     & 10k   & 23.99 & $+834$ & Quality unusable \\
+Cosine      & 10k  & 23.72 & $+2.73$ & Good quality \\
+\textbf{DE (step)} & \textbf{5k} & \textbf{23.16} & \textbf{+1.68} & \textbf{Best trade-off} \\
+DE (step)   & 10k  & 22.39 & $+1.03$ & Marginal PPL gain \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The Dual-Encoder (step) at K=5k represents the recommended operating point for
-quality-sensitive workloads: lowest perplexity degradation among methods with
-$\geq$98\% memory bandwidth reduction, at 13.88\,tok/s.
+On T4, DE (step) at K=5k represents the recommended operating point:
+23.16\,tok/s ($-$13\% vs.\ baseline) with $\Delta$PPL=+1.68 --- 96.1\%
+memory bandwidth reduction at minimal quality cost. The throughput penalty
+is considerably more acceptable on GPU than on memory-bandwidth-limited
+hardware.
 
 \begin{figure}[H]
 \centering
@@ -537,22 +544,26 @@ edge weights encode how frequently token $v$ follows token $u$ in training.
 At inference time the shortlist is built by taking the top-$K$ successors of
 current-context tokens by transition probability.
 \begin{itemize}[leftmargin=*, itemsep=0pt, topsep=2pt]
-  \item Acceptance rate: 99.9\% across all $K$ --- the highest of any method.
-  \item Throughput: 10.95--12.17\,tok/s --- graph traversal and sparse index
-        operations add 38--48\,ms overhead per step.
-  \item PPL at K=10k: +2.09.
+  \item Acceptance rate: $\geq$99.9\% across all $K$ --- the highest of any method.
+  \item Throughput: 22.83--24.31\,tok/s ($-14\%$ to $-16\%$ vs.\ baseline).
+  \item PPL at K=10k: +2.11.
 \end{itemize}
 
 \textbf{Attention Graph.} Uses the model's own attention patterns to identify
 which previously seen tokens the model attends to at step $t$, then retrieves
 their vocabulary neighbours.
 \begin{itemize}[leftmargin=*, itemsep=0pt, topsep=2pt]
-  \item Acceptance at $K \geq 1$k: 99.7\%.
-  \item Throughput: 5.79--9.13\,tok/s --- \code{output\_attentions=True}
-        forces eager attention, disabling FlashAttention and adding
-        ${\sim}$115\,ms overhead per step.
-  \item PPL at K=10k: +1.30 --- second-best quality result after DE step.
+  \item Acceptance at $K \geq 1$k: 99.8\%.
+  \item Throughput: 19.98--22.72\,tok/s ($-15\%$ to $-25\%$ vs.\ baseline).
+        \code{output\_attentions=True} forces eager attention; on GPU this
+        penalty is proportionally smaller than on memory-bandwidth-limited
+        hardware.
+  \item PPL at K=10k: +1.33 --- second-best quality result after DE step.
 \end{itemize}
+
+The attention graph's quality ($\Delta$PPL=+1.33) is the second best of all
+methods. A CUDA-native implementation reading pre-computed attention patterns
+without re-running attention would recover this overhead.
 
 \subsection{Speculative Decoding via Retrieval}
 
@@ -565,23 +576,23 @@ from a 1-hop graph walk. The full model runs two forward passes per step, and
 
 \begin{table}[h]
 \centering
-\caption{Chain-based speculative decoding results.}
+\caption{Chain-based speculative decoding results (T4 GPU).}
 \label{tab:spec-v1}
 \small
 \begin{tabular}{@{}lrrr@{}}
 \toprule
 \tblhead{Config} & \tblhead{Tok/s} & \tblhead{Draft acc.} & \tblhead{Speedup} \\
 \midrule
-Cosine ($D{=}4$)          & 1.79  & 28.0\% & $0.08{\times}$ \\
-Attn+Graph ($D{=}4$)      & 1.43  & 28.4\% & $0.06{\times}$ \\
-\textbf{Full-vocab baseline} & \textbf{22.80} & --- & \textbf{1.0×} \\
+Cosine ($D{=}4$)          & 2.92  & 27.7\% & $0.11{\times}$ \\
+Attn+Graph ($D{=}4$)      & 2.88  & 28.1\% & $0.11{\times}$ \\
+\textbf{Full-vocab baseline} & \textbf{26.60} & --- & \textbf{1.0×} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-At 1.43--1.79\,tok/s this is 6--8\% of baseline. Two compounding factors:
-(1) two full forward passes per step with no parallelism gain; (2)
-\code{output\_attentions=True} adding ${\sim}$115\,ms eager-attention overhead.
+At 2.88--2.92\,tok/s this is ${\sim}$11\% of baseline. Two compounding
+factors: (1) two full forward passes per step with no parallelism gain;
+(2) \code{output\_attentions=True} adding eager-attention overhead per step.
 
 \begin{figure}[H]
 \centering
@@ -601,26 +612,30 @@ $O(T+D)$. No \code{output\_attentions}; standard SDPA throughout.
 
 \begin{table}[h]
 \centering
-\caption{Retrieval-based speculative decoding (v2) sweep results.}
+\caption{Retrieval-based speculative decoding (v2) sweep results (T4 GPU).}
 \label{tab:spec-v2}
 \small
 \begin{tabular}{@{}rrrrrr@{}}
 \toprule
 \tblhead{K} & \tblhead{D} & \tblhead{Tok/s} & \tblhead{Tok/step} & \tblhead{Draft acc.} & \tblhead{Speedup} \\
 \midrule
-4 &  4 & 2.25 & 1.18 & 1.1\% & $0.10{\times}$ \\
-4 &  8 & 2.03 & 1.12 & 0.4\% & $0.09{\times}$ \\
-4 & 16 & 2.00 & 1.12 & 0.2\% & $0.09{\times}$ \\
-8 &  4 & 1.74 & 1.26 & 0.8\% & $0.08{\times}$ \\
-8 &  8 & 1.62 & 1.22 & 0.4\% & $0.07{\times}$ \\
-8 & 16 & 1.50 & 1.21 & 0.2\% & $0.07{\times}$ \\
+ 4 &  4 & 2.44 & 1.19 & 1.2\% & $0.09{\times}$ \\
+ 4 &  8 & 2.38 & 1.16 & 0.5\% & $0.09{\times}$ \\
+ 4 & 16 & 2.38 & 1.16 & 0.3\% & $0.09{\times}$ \\
+ 8 &  4 & 1.63 & 1.27 & 0.8\% & $0.06{\times}$ \\
+ 8 &  8 & 1.58 & 1.24 & 0.4\% & $0.06{\times}$ \\
+ 8 & 16 & 1.58 & 1.24 & 0.2\% & $0.06{\times}$ \\
+16 &  4 & 1.03 & 1.40 & 0.6\% & $0.04{\times}$ \\
+16 &  8 & 0.97 & 1.34 & 0.3\% & $0.04{\times}$ \\
+16 & 16 & 0.97 & 1.34 & 0.1\% & $0.04{\times}$ \\
+32 &  4 & 0.63 & 1.59 & 0.5\% & $0.02{\times}$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 The KV-cache fix eliminated the $O(T^2)$ quadratic cost from v1, improving
-throughput to 1.5--2.3\,tok/s. However, draft acceptance rates collapsed to
-\textbf{0.2--1.1\%} --- far below the ${\sim}$70--80\% needed for speculative
+throughput to 0.63--2.44\,tok/s. However, draft acceptance rates collapsed to
+\textbf{0.1--1.2\%} --- far below the ${\sim}$70--80\% needed for speculative
 speedup. The root cause is a \textbf{retrieval signal mismatch}: the index
 embeds prefix hidden states from an offline training-data pass, while at
 inference time $h_T$ is a function of the full prompt history. The dot-product
@@ -635,30 +650,30 @@ Using GPU on-demand pricing (A100 @ \$3.00/hr = \$0.000833/s):
 
 \begin{table}[h]
 \centering
-\caption{Cost per 1M tokens at A100 on-demand pricing.}
+\caption{Cost per 1M tokens at A100 on-demand pricing (tok/s from T4 GPU).}
 \label{tab:cost}
 \small
 \begin{tabular}{@{}llrrl@{}}
 \toprule
 \tblhead{Method} & \tblhead{K} & \tblhead{Tok/s} & \tblhead{\$/1M tok} & \tblhead{vs.\ base} \\
 \midrule
-\textbf{Baseline} & 128k & 22.80 & \$36.56 & --- \\
-Cosine       & 10k & 13.61 & \$61.24  & $+68\%$ \\
-DE (step)    &  2k & 15.16 & \$54.96  & $+50\%$ \\
-DE (step)    &  5k & 13.88 & \$60.04  & $+64\%$ \\
-DE (step)    & 10k & 13.17 & \$63.30  & $+73\%$ \\
-MLP Graph    & 10k & 10.95 & \$76.09  & $+108\%$ \\
-Attn Graph   & 10k &  6.07 & \$137.38 & $+276\%$ \\
-Spec (v1)    & D=4 &  1.43 & $\sim$\$582 & $+1{,}492\%$ \\
+\textbf{Baseline} & 128k & 26.60 & \$31.33 & --- \\
+Cosine       & 10k & 23.72 & \$35.13  & $+12\%$ \\
+DE (step)    &  2k & 23.20 & \$35.92  & $+15\%$ \\
+DE (step)    &  5k & 23.16 & \$35.99  & $+15\%$ \\
+DE (step)    & 10k & 22.39 & \$37.22  & $+19\%$ \\
+MLP Graph    & 10k & 22.83 & \$36.50  & $+16\%$ \\
+Attn Graph   & 10k & 19.98 & \$41.72  & $+33\%$ \\
+Spec (v1)    & D=4 &  2.88 & $\sim$\$289 & $+822\%$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-All pruned methods increase cost per token on a 1B model. Break-even requires
-the \code{lm\_head} fraction to exceed the router overhead fraction ---
-approximately 65\% on a 1B model vs.\ measured 14.1\%. At 70B scale, step
-time ${\approx}$1,200\,ms and break-even drops to ${\sim}$2.4\%, well within
-reach.
+On GPU the cost overhead of pruned methods is much more modest than on
+memory-limited hardware: 12--33\% above baseline for the viable methods.
+Break-even between router cost and \code{lm\_head} savings still requires a
+larger model (see Section~\ref{sec:lmhead-fraction}), but the arithmetic is
+less unfavourable on GPU.
 
 % ────────────────────────────────────────────────────────────
 \section{Discussion}
@@ -684,7 +699,8 @@ shifts) that the router misses at any $K$.
 \begin{itemize}[leftmargin=*, itemsep=1pt, topsep=2pt]
   \item Evaluation limited to a single 1B model and a single dataset
         (WikiText-2 English prose).
-  \item All latency measurements on MPS (Apple Silicon); CUDA results pending.
+  \item Evaluation on a single GPU tier (NVIDIA T4); results at
+        higher-bandwidth GPUs (A100, H100) may differ.
   \item The dual-encoder is trained on token-level prediction; it may not
         generalise to multi-token idiomatic phrases or specialised domains
         (code, mathematics, non-English text).
@@ -698,18 +714,20 @@ shifts) that the router misses at any $K$.
 The core finding --- that vocabulary pruning does not improve throughput on a
 1B model --- follows directly from arithmetic:
 \begin{align*}
-  \text{lm\_head saving} &= 43.9\,\text{ms} \times 0.141 \times 0.922 = 5.7\,\text{ms} \\
-  \text{Router overhead (DE, K=10k)} &= 26.4\,\text{ms} \\
-  \text{Net:} &\;{+}20.7\,\text{ms/step} \;\Rightarrow\; {-}42\%\;\text{throughput}
+  \text{lm\_head saving} &= 37.60\,\text{ms} \times 0.061 \times 0.922 = 2.12\,\text{ms} \\
+  \text{Router overhead (DE, K=10k)} &= 44.67 - 37.60 = 7.07\,\text{ms} \\
+  \text{Net:} &\;{+}4.95\,\text{ms/step} \;\Rightarrow\; {-}13\%\;\text{throughput}
 \end{align*}
 For pruning to be net-positive, the \code{lm\_head} fraction must exceed:
 \begin{equation}
   f_{\text{break-even}} =
   \frac{\text{router\_overhead\_ms}}{\text{step\_ms} \times (1 - K/V)}
 \end{equation}
-On this 1B model, break-even requires $f \approx 65\%$; measured value is
-14.1\%. At 70B scale (step $\approx$1,200\,ms), break-even drops to
-${\sim}$2.4\% --- well below the expected \code{lm\_head} fraction.
+On this 1B model, break-even requires $f \approx 20\%$; measured value is
+6.1\%. At 70B scale (step $\approx$1,200\,ms), break-even drops to
+${\sim}0.64\%$ --- well below the expected \code{lm\_head} fraction at any
+model size. This is the regime where vocabulary pruning becomes genuinely
+useful.
 
 Importantly, the \textbf{memory bandwidth saving} is real at all scales.
 Reducing \code{lm\_head} traffic by 92\% matters for edge deployment (models
@@ -746,31 +764,36 @@ discriminatively trained retrieval model.
 
 We implemented and benchmarked six vocabulary pruning strategies and two
 retrieval-based speculative decoders against a full-vocabulary baseline on
-\code{Llama-3.2-1B-Instruct} and WikiText-2.
+\code{Llama-3.2-1B-Instruct} and WikiText-2, on an NVIDIA T4 GPU.
 
 \textbf{The memory bandwidth result is the genuine contribution.} Pruning
 \code{lm\_head} to K=10k reduces the weight matrix loaded per step from
 525\,MB to 41\,MB --- a 92.2\% reduction --- while DE (step) at K=5k keeps
-$\Delta$PPL to +1.67 above the 26.26 baseline.
+$\Delta$PPL to +1.68 above the 26.24 baseline.
 
-\textbf{The throughput result is an honest negative.} On a 1B model on MPS,
-the \code{lm\_head} fraction is only 14.1\%. Every router tested adds more
-overhead than it saves. Break-even requires a much larger model (70B+) or a
-GPU-native router kernel reducing overhead below ${\sim}$2\,ms.
+\textbf{The throughput result is an honest negative.} On a 1B model on a T4
+GPU, the \code{lm\_head} fraction is only 6.1\%. Break-even requires
+$f \approx 20\%$ vs.\ measured 6.1\%; no pruned method reduces wall-clock
+cost at this model scale. However, the overhead gap is considerably narrower
+than on memory-bandwidth-limited hardware: DE (step) at K=5k costs only
+$-$13\% throughput vs.\ baseline, and the DE (prefetch+refresh) variant
+exceeds baseline throughput (+4\%, 27.67\,tok/s) by amortising router cost
+across many steps, at the cost of +146 PPL degradation. Break-even for
+quality-preserving pruning requires a much larger model (70B+) or a
+GPU-native router kernel reducing overhead below ${\sim}$1\,ms.
 
 \textbf{Speculative decoding via retrieval} was evaluated in two
-implementations. The chain-based v1 achieved 1.43\,tok/s (6\% of baseline)
+implementations. The chain-based v1 achieved 2.88\,tok/s (11\% of baseline)
 with 28\% draft acceptance. The retrieval-based v2 removed both overhead
-sources but draft acceptance collapsed to 0.2--1.1\% due to retrieval signal
+sources but draft acceptance collapsed to 0.1--1.2\% due to retrieval signal
 mismatch. A useful retrieval-based speculative decoder requires a
 \emph{discriminatively trained} retrieval model.
 
 \textbf{Future work:}
 \begin{itemize}[leftmargin=*, itemsep=1pt, topsep=2pt]
-  \item \textbf{GPU benchmarks.} Reproduce all results on NVIDIA A10G/A100
-        to validate whether the overhead balance shifts at CUDA speeds.
   \item \textbf{GPU-native router kernel.} Implement the DE router as a fused
-        CUDA kernel to reduce overhead from ${\sim}$26\,ms to $<$2\,ms.
+        CUDA kernel to reduce overhead from ${\sim}$7\,ms to $<$1\,ms --- the
+        key step for making pruning viable on 7B models.
   \item \textbf{INSTRUCTOR-style router.} Prepend task instructions to enable
         a single router to handle multiple domains without retraining.
   \item \textbf{Discriminative retrieval for speculative decoding.} Train a
@@ -782,6 +805,9 @@ mismatch. A useful retrieval-based speculative decoder requires a
   \item \textbf{Larger model evaluation.} Test 8B and 70B Llama-3.1
         checkpoints, where the \code{lm\_head} fraction is expected to be
         higher and router overhead is proportionally smaller.
+  \item \textbf{Higher-bandwidth GPU evaluation.} Reproduce on A100/H100 to
+        determine whether higher memory bandwidth changes the break-even
+        arithmetic for smaller models.
 \end{itemize}
 
 % ────────────────────────────────────────────────────────────
