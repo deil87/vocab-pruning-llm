@@ -1,4 +1,5 @@
 """Central configuration for all experiments."""
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
@@ -7,7 +8,9 @@ from typing import List
 @dataclass
 class Config:
     # ── Model / data ──────────────────────────────────────────────────────────
-    model_name: str = "meta-llama/Llama-3.2-1B-Instruct"
+    # Override by setting MODEL_NAME env var before running scripts, e.g.:
+    #   MODEL_NAME=meta-llama/Llama-3.1-8B-Instruct python run_baseline.py
+    model_name: str = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-1B-Instruct")
     dataset_name: str = "wikitext"
     dataset_config: str = "wikitext-2-raw-v1"
     seed: int = 42
