@@ -12,11 +12,13 @@ from src.config import CFG
 from src.model_utils import DEVICE
 
 
-def _sync():
-    if DEVICE.type == "mps":
+def _sync(device=None):
+    """Synchronise the given device (or DEVICE if not specified)."""
+    dev = device if device is not None else DEVICE
+    if str(dev).startswith("mps"):
         torch.mps.synchronize()
-    elif DEVICE.type == "cuda":
-        torch.cuda.synchronize()
+    elif str(dev).startswith("cuda"):
+        torch.cuda.synchronize(dev)
 
 
 # ── Generic router evaluator ──────────────────────────────────────────────────
@@ -54,16 +56,17 @@ def evaluate_router(
                 hidden = out.hidden_states[-1][:, -1, :]
                 past_key_values = out.past_key_values
 
-                full_logits = hidden @ model.lm_head.weight.T
+                lm_dev = model.lm_head.weight.device
+                full_logits = hidden.to(lm_dev) @ model.lm_head.weight.T
                 gold_token = full_logits[0].argmax().item()
 
                 hidden_cpu = hidden[0].float().cpu()
                 shortlist = router_fn(hidden_cpu, k)
 
-                pruned_weight = model.lm_head.weight[shortlist]
+                pruned_weight = model.lm_head.weight[shortlist]  # on lm_dev
                 t_lm0 = time.perf_counter()
-                pruned_logits = hidden @ pruned_weight.T
-                _sync()
+                pruned_logits = hidden.to(lm_dev) @ pruned_weight.T
+                _sync(lm_dev)
                 t_lm1 = time.perf_counter()
 
                 pruned_best = shortlist[pruned_logits[0].argmax().item()].item()
@@ -71,7 +74,7 @@ def evaluate_router(
                 total_steps += 1
 
                 input_ids = torch.tensor([[gold_token]], device=DEVICE)
-                _sync()
+                _sync(DEVICE)
                 total_times.append(time.perf_counter() - t_start)
                 lmhead_times.append(t_lm1 - t_lm0)
 
@@ -165,9 +168,9 @@ def compute_perplexity_cosine(
             T = hiddens.size(1)
             for t in range(T):
                 shortlist = topk_idx[t]                   # [k] on DEVICE
-                h_t = h_all[t]                            # [d] on DEVICE
-                pruned_w = model.lm_head.weight.float()[shortlist]  # [k, d] on DEVICE
-                logits = h_t @ pruned_w.T                 # [k] on DEVICE
+                h_t = h_all[t]                            # [d] on lm_head device
+                pruned_w = model.lm_head.weight.float()[shortlist]  # [k, d] on lm_head device
+                logits = h_t.to(pruned_w.device) @ pruned_w.T  # [k] on lm_head device
                 target = targets[0, t].item()
 
                 # Check if target is in shortlist
@@ -212,15 +215,16 @@ def evaluate_attention_router(
                 past_key_values = out.past_key_values
                 h_cpu = hidden[0].float().cpu()
 
-                full_logits = hidden @ model.lm_head.weight.T
+                lm_dev = model.lm_head.weight.device
+                full_logits = hidden.to(lm_dev) @ model.lm_head.weight.T
                 gold_token = full_logits[0].argmax().item()
 
                 shortlist = attn_shortlist_fn(h_cpu, k, seq_ids, out.attentions)
 
-                pruned_weight = model.lm_head.weight[shortlist]
+                pruned_weight = model.lm_head.weight[shortlist]  # on lm_dev
                 t_lm0 = time.perf_counter()
-                pruned_logits = hidden @ pruned_weight.T
-                _sync()
+                pruned_logits = hidden.to(lm_dev) @ pruned_weight.T
+                _sync(lm_dev)
                 t_lm1 = time.perf_counter()
 
                 pruned_best = shortlist[pruned_logits[0].argmax().item()].item()
@@ -230,7 +234,7 @@ def evaluate_attention_router(
                 input_ids = torch.tensor([[gold_token]], device=DEVICE)
                 seq_ids = torch.cat([seq_ids, torch.tensor([gold_token])])
 
-                _sync()
+                _sync(DEVICE)
                 total_times.append(time.perf_counter() - t_start)
                 lmhead_times.append(t_lm1 - t_lm0)
 
@@ -320,16 +324,17 @@ def evaluate_prefetch_router(
                 past_key_values = out.past_key_values
                 h_cpu = hidden[0].float().cpu()
 
-                full_logits = hidden @ model.lm_head.weight.T
+                lm_dev = model.lm_head.weight.device
+                full_logits = hidden.to(lm_dev) @ model.lm_head.weight.T
                 gold_token = full_logits[0].argmax().item()
 
                 if generated_count > 0 and generated_count % refresh_every == 0:
                     shortlist = refresh_fn(shortlist, h_cpu)
 
-                pruned_weight = model.lm_head.weight[shortlist]
+                pruned_weight = model.lm_head.weight[shortlist]  # on lm_dev
                 t_lm0 = time.perf_counter()
-                pruned_logits = hidden @ pruned_weight.T
-                _sync()
+                pruned_logits = hidden.to(lm_dev) @ pruned_weight.T
+                _sync(lm_dev)
                 t_lm1 = time.perf_counter()
 
                 pruned_best = shortlist[pruned_logits[0].argmax().item()].item()
@@ -340,7 +345,7 @@ def evaluate_prefetch_router(
                 input_ids = torch.tensor([[gold_token]], device=DEVICE)
                 generated_count += 1
 
-                _sync()
+                _sync(DEVICE)
                 total_times.append(time.perf_counter() - t_start)
                 lmhead_times.append(t_lm1 - t_lm0)
 

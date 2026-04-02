@@ -38,7 +38,7 @@ def build_mlp_transition_graph(model, lm_head_weight: torch.Tensor):
             for mlp in mlp_layers:
                 h = h + mlp(h)
 
-            logits = h.float() @ model.lm_head.weight.float().T  # [B, V]
+            logits = h.float().to(model.lm_head.weight.device) @ model.lm_head.weight.float().T  # [B, V]
             top = logits.topk(M, dim=1)
             probs = F.softmax(top.values, dim=-1)
 

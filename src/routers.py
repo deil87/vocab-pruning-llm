@@ -33,14 +33,15 @@ def get_cosine_shortlist(hidden: torch.Tensor, lm_head_norm_dev: torch.Tensor,
                          k: int) -> torch.Tensor:
     """
     On-device cosine shortlist.
-    hidden: [d] — any device/dtype (will be moved to DEVICE and cast to float32).
-    lm_head_norm_dev: F.normalize(lm_head.weight, dim=-1) [V, d] on DEVICE, float32.
+    hidden: [d] — any device/dtype (will be moved to lm_head_norm_dev's device, float32).
+    lm_head_norm_dev: F.normalize(lm_head.weight, dim=-1) [V, d] on its device, float32.
     Returns: [k] LongTensor on CPU.
     """
-    h = hidden.to(DEVICE).float().unsqueeze(0)                    # [1, d] float32 on DEVICE
-    h_norm = F.normalize(h, dim=-1)                               # [1, d]
-    sims = (h_norm @ lm_head_norm_dev.T).squeeze(0)               # [V] on DEVICE
-    topk_idx = sims.topk(k).indices.cpu()                         # [k] on CPU
+    lm_dev = lm_head_norm_dev.device
+    h = hidden.to(lm_dev).float().unsqueeze(0)                # [1, d] float32 on lm_dev
+    h_norm = F.normalize(h, dim=-1)                           # [1, d]
+    sims = (h_norm @ lm_head_norm_dev.T).squeeze(0)           # [V] on lm_dev
+    topk_idx = sims.topk(k).indices.cpu()                     # [k] on CPU
     return topk_idx
 
 
@@ -89,7 +90,8 @@ def get_dual_encoder_shortlist(
         return all_ids[:k]
 
     # Pad with cosine-nearest on device
-    h_dev = hidden.to(DEVICE).float().unsqueeze(0)
+    lm_dev = lm_head_norm_dev.device
+    h_dev = hidden.to(lm_dev).float().unsqueeze(0)
     h_norm = F.normalize(h_dev, dim=-1)
     cos_sims = (h_norm @ lm_head_norm_dev.T).squeeze(0).cpu()
     cos_sims[all_ids] = -1e9
@@ -173,7 +175,8 @@ def get_attention_shortlist(
     attended_token_ids = ids_cpu[top_pos]                         # [n_pos] CPU
 
     # Token-neighbour lookup on device
-    attended_embs = lm_head_norm_dev[attended_token_ids.to(DEVICE)]  # [n_pos, d]
+    lm_dev = lm_head_norm_dev.device
+    attended_embs = lm_head_norm_dev[attended_token_ids.to(lm_dev)]  # [n_pos, d]
     sims = attended_embs @ lm_head_norm_dev.T                        # [n_pos, V]
     nbr_k = min(CFG.attn_neighbour_k, lm_head_norm_dev.shape[0])
     nbr_idx = sims.topk(nbr_k, dim=1).indices.cpu()                  # [n_pos, nbr_k]
@@ -183,7 +186,7 @@ def get_attention_shortlist(
     if len(all_ids) >= k:
         return all_ids[:k]
 
-    h_dev = hidden.to(DEVICE).float().unsqueeze(0)
+    h_dev = hidden.to(lm_dev).float().unsqueeze(0)
     h_norm = F.normalize(h_dev, dim=-1)
     cos_sims = (h_norm @ lm_head_norm_dev.T).squeeze(0).cpu()
     cos_sims[all_ids] = -1e9
@@ -205,9 +208,10 @@ def get_graph_shortlist(
     2. 1-hop graph walk from each anchor.
     3. Union → k tokens.
     """
-    h_dev = hidden.to(DEVICE).float().unsqueeze(0)
+    lm_dev = lm_head_norm_dev.device
+    h_dev = hidden.to(lm_dev).float().unsqueeze(0)
     h_norm = F.normalize(h_dev, dim=-1)
-    cos_sims_dev = (h_norm @ lm_head_norm_dev.T).squeeze(0)   # [V] on DEVICE
+    cos_sims_dev = (h_norm @ lm_head_norm_dev.T).squeeze(0)   # [V] on lm_dev
     anchor_ids = cos_sims_dev.topk(CFG.graph_anchor_k).indices.cpu()  # [A] CPU
 
     neighbour_ids = graph_edges[anchor_ids].reshape(-1).long()  # [A * M] CPU

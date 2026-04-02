@@ -13,19 +13,28 @@ from src.config import CFG
 from src.model_utils import DEVICE
 
 
-def _sync():
-    if DEVICE.type == "mps":
+def _sync(device=None):
+    """Synchronise the given device (or DEVICE if not specified)."""
+    dev = device if device is not None else DEVICE
+    if str(dev).startswith("mps"):
         torch.mps.synchronize()
-    elif DEVICE.type == "cuda":
-        torch.cuda.synchronize()
+    elif str(dev).startswith("cuda"):
+        torch.cuda.synchronize(dev)
 
 
 def timed_lm_head(hidden: torch.Tensor, weight: torch.Tensor):
-    """Run lm_head projection; return (logits, elapsed_seconds)."""
-    _sync()
+    """Run lm_head projection; return (logits, elapsed_seconds).
+
+    hidden and weight may live on different devices when the model is sharded
+    across multiple GPUs (device_map='auto'). We move hidden to weight's device
+    before the matmul, so the operation is always local.
+    """
+    lm_dev = weight.device
+    hidden_lm = hidden.to(lm_dev)
+    _sync(lm_dev)
     t0 = time.perf_counter()
-    logits = hidden @ weight.T
-    _sync()
+    logits = hidden_lm @ weight.T
+    _sync(lm_dev)
     return logits, time.perf_counter() - t0
 
 
@@ -49,10 +58,10 @@ def baseline_decode_with_profile(model, input_ids: torch.Tensor,
             past_key_values = out.past_key_values
 
             logits, lmhead_t = timed_lm_head(hidden, model.lm_head.weight)
-            next_token = logits[0].argmax(dim=-1, keepdim=True).unsqueeze(0)
+            next_token = logits[0].argmax(dim=-1, keepdim=True).unsqueeze(0).to(DEVICE)
             input_ids = next_token
 
-            _sync()
+            _sync(DEVICE)
             total_times.append(time.perf_counter() - t_start)
             lmhead_times.append(lmhead_t)
 
