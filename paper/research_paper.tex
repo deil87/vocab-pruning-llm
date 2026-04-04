@@ -170,10 +170,9 @@ vocabulary region is relevant before the full projection is run?}
   \item \textbf{Benchmark.} All methods evaluated on WikiText-2, reporting
         token acceptance rate, perplexity, and tokens/sec across
         $K \in \{512,1\text{k},2\text{k},5\text{k},10\text{k}\}$.
-  \item \textbf{Scale evaluation.} The full router suite (excluding cosine)
-        re-evaluated on \code{Llama-3.1-8B-Instruct} on two T4 GPUs
-        (\code{device\_map="auto"}), quantifying how overhead and quality
-        scale with model size.
+  \item \textbf{Scale evaluation.} The full router suite re-evaluated on
+        \code{Llama-3.1-8B-Instruct} on two T4 GPUs (\code{device\_map="auto"}),
+        quantifying how overhead and quality scale with model size.
 \end{enumerate}
 
 % ────────────────────────────────────────────────────────────
@@ -423,9 +422,7 @@ Attention Graph      & 82.7 & 99.8 & 99.8 & 99.8 & 99.8 \\
 \begin{table*}[t]
 \centering
 \caption{Token acceptance rate (\%) vs.\ shortlist size $K$ --- 8B model (T4$\times$2).
-         Cosine router not evaluated on 8B due to multi-GPU device
-         incompatibility\textsuperscript{$\ddagger$}; Attention Graph omitted
-         (prohibitive overhead on T4$\times$2).}
+         Attention Graph omitted (prohibitive overhead on T4$\times$2).}
 \label{tab:acceptance-8b}
 \small
 \begin{tabular}{@{}lrrrrr@{}}
@@ -434,13 +431,11 @@ Attention Graph      & 82.7 & 99.8 & 99.8 & 99.8 & 99.8 \\
 \midrule
 Static Top-K          & 3.9  & 4.0  & 4.4  & 5.8  & 8.4  \\
 Cluster               & 44.1 & 60.2 & 66.1 & 76.4 & 85.2 \\
-Cosine                & \multicolumn{5}{c}{N/A\textsuperscript{$\ddagger$}} \\
+Cosine                & 98.2 & 98.2 & 98.2 & 98.2 & 98.2 \\
 Dual-Encoder (step)   & 99.8 & 99.8 & 99.8 & 99.8 & 99.8 \\
 DE (prefetch+refresh) & ---  & ---  & ---  & 87.9 & ---  \\
 MLP Graph             & 99.8 & 99.8 & 99.8 & 99.8 & 99.8 \\
 \bottomrule
-\multicolumn{6}{l}{\footnotesize $\ddagger$ Cosine PPL evaluation failed
-  silently on T4$\times$2 (\code{lm\_head} on \code{cuda:1}); no result written.}
 \end{tabular}
 \end{table*}
 
@@ -454,8 +449,10 @@ respectively), essentially independent of $K$ above 512.
 On the 8B model (Table~\ref{tab:acceptance-8b}), DE (step) and MLP Graph
 transfer perfectly, both achieving \textbf{99.8\%} acceptance at all $K$.
 Cluster improves to 85.2\% at K=10k (vs.\ 83.3\% on 1B). Static Top-K
-remains near-random. Cosine was not evaluated on 8B due to a multi-GPU
-device compatibility issue (footnote $\ddagger$).
+remains near-random. Cosine achieves 98.2\% acceptance on 8B --- flat
+across all $K$, identical ceiling behaviour to the 1B model (98.4\%),
+confirming the router hits its information-theoretic ceiling regardless of
+model size.
 
 \begin{figure*}[t]
 \centering
@@ -495,20 +492,19 @@ Attention Graph                 & +15025 & +21.58 & +5.91 & +2.10 & \textbf{+1.3
 \begin{table*}[t]
 \centering
 \caption{Perplexity degradation ($\Delta$PPL) vs.\ shortlist size $K$ --- 8B model (baseline PPL = 16.63).
-         Static Top-K and Cluster omitted (extreme values: $\Delta$PPL $\gg 10^3$).
-         Cosine not evaluated (N/A\textsuperscript{$\ddagger$}).}
+         Static Top-K and Cluster omitted (extreme values: $\Delta$PPL $\gg 10^3$).}
 \label{tab:ppl-8b}
 \small
 \begin{tabular}{@{}lrrrrr@{}}
 \toprule
 \tblhead{Router} & \tblhead{K=512} & \tblhead{K=1k} & \tblhead{K=2k} & \tblhead{K=5k} & \tblhead{K=10k} \\
 \midrule
+Cosine                          & +5.05 & +3.21 & +2.43 & +1.40 & \textbf{+1.01} \\
 Dual-Encoder (step)             & +6.63 & +2.09 & +1.15 & +0.55 & \textbf{+0.29} \\
 Dual-Encoder (prefetch+refresh)\textsuperscript{$\dagger$} & --- & --- & --- & +122.85 & --- \\
 MLP Graph                       & +10.82 & +3.57 & +2.10 & +1.20 & \textbf{+0.82} \\
 \bottomrule
-\multicolumn{6}{l}{\footnotesize $\dagger$ Effective $K{\approx}4{,}112$ (8B).
-  \quad $\ddagger$ See Table~\ref{tab:acceptance-8b} footnote.}
+\multicolumn{6}{l}{\footnotesize $\dagger$ Effective $K{\approx}4{,}112$ (8B).}
 \end{tabular}
 \end{table*}
 
@@ -517,7 +513,8 @@ Graph (+1.33), MLP Graph (+2.11), and Cosine (+2.73) --- all within 11\% of
 baseline PPL. DE step at K=5k achieves $\Delta$PPL=+1.68 with a 96.1\%
 memory bandwidth reduction.
 
-On the 8B model, quality improves significantly at the same $K$: DE (step)
+On the 8B model, quality improves significantly at the same $K$: Cosine at
+K=10k achieves $\Delta$PPL=\textbf{+1.01} (vs.\ +2.73 on 1B), DE (step)
 at K=10k reaches $\Delta$PPL=\textbf{+0.29} (vs.\ +1.03 on 1B), and MLP
 Graph reaches \textbf{+0.82} (vs.\ +2.11). This improvement likely reflects
 the higher-capacity 8B model producing a richer hidden state that the router
@@ -572,6 +569,7 @@ Attention Graph   & 22.72 & 20.71 & 21.30 & 20.12 & 19.98 & $-15\%$ to $-25\%$ \
 \textbf{Baseline} & --- & --- & --- & --- & 11.48 & --- \\
 Static Top-K      & 11.31 & 11.33 & 11.32 & 11.28 & 11.21 & $-1\%$ to $-2\%$ \\
 Cluster           & 11.16 & 11.16 & 11.15 & 11.11 & 11.04 & $-3\%$ to $-4\%$ \\
+Cosine            & 10.50 & 10.50 & 10.49 & 10.46 & 10.40 & $-9\%$ to $-10\%$ \\
 DE (prefetch+refresh) & --- & --- & --- & 11.26 & --- & $-2\%$ \\
 Dual-Encoder (step)   & 10.17 & 10.15 & 10.10 & 10.00 & 9.89  & $-11\%$ to $-14\%$ \\
 MLP Graph         & 10.23 & 10.22 & 10.17 & 10.06 & 9.94  & $-11\%$ to $-13\%$ \\
@@ -589,7 +587,9 @@ the worst due to \code{output\_attentions=True} forcing eager attention.
 
 On the 8B model (Table~\ref{tab:throughput-8b}), the absolute overhead gap
 narrows compared to 1B: DE (step) costs $-11\%$ to $-14\%$ (vs.\ $-13\%$ to
-$-16\%$ on 1B), and Static Top-K costs only $-1\%$ to $-2\%$. The DE
+$-16\%$ on 1B), and Static Top-K costs only $-1\%$ to $-2\%$. Cosine incurs
+$-9\%$ to $-10\%$ overhead on 8B --- the same relative cost as on 1B,
+consistent with its fixed brute-force matmul over $W_V$. The DE
 (prefetch+refresh) variant costs $-2\%$ (vs.\ $+4\%$ on 1B), a difference
 attributable to the smaller effective shortlist at 8B ($K_\text{eff}\approx4{,}112$
 vs.\ $4{,}634$ on 1B). The overhead gap is closing with model scale, consistent

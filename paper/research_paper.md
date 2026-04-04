@@ -39,7 +39,7 @@ This paper makes the following contributions:
 2. **Router taxonomy:** We define and implement four vocabulary routing strategies of increasing sophistication.
 3. **Dual-Encoder Router:** We propose a Dual-Encoder trained with MNRL that learns to map the LLM's hidden state to a compact token shortlist, operating entirely within the model's own latent space.
 4. **Benchmark:** We evaluate all methods against a full-vocabulary baseline on WikiText-2, reporting token acceptance rate, perplexity, and tokens/sec across shortlist sizes K ∈ {512, 1k, 2k, 5k, 10k}.
-5. **Scale evaluation:** The full router suite (excluding cosine) re-evaluated on `Llama-3.1-8B-Instruct` on two T4 GPUs (`device_map="auto"`), quantifying how overhead and quality scale with model size.
+5. **Scale evaluation:** The full router suite re-evaluated on `Llama-3.1-8B-Instruct` on two T4 GPUs (`device_map="auto"`), quantifying how overhead and quality scale with model size.
 
 ---
 
@@ -181,22 +181,20 @@ The `lm_head` accounts for 6.1% of per-token latency on the 1B model and 4.69% o
 | MLP Graph | 99.9% | 100.0% | 100.0% | 100.0% | 100.0% |
 | Attention Graph | 82.7% | 99.8% | 99.8% | 99.8% | 99.8% |
 
-**8B model (T4×2):** Cosine not evaluated (N/A†); Attention Graph not evaluated (prohibitive overhead on T4×2).
+**8B model (T4×2):** Attention Graph not evaluated (prohibitive overhead on T4×2).
 
 | Router | K=512 | K=1k | K=2k | K=5k | K=10k |
 |--------|------:|-----:|-----:|-----:|------:|
 | Static Top-K | 3.9% | 4.0% | 4.4% | 5.8% | 8.4% |
 | Cluster | 44.1% | 60.2% | 66.1% | 76.4% | 85.2% |
-| Cosine | N/A† | N/A† | N/A† | N/A† | N/A† |
+| Cosine | 98.2% | 98.2% | 98.2% | 98.2% | 98.2% |
 | Dual-Encoder (step) | 99.8% | 99.8% | 99.8% | 99.8% | 99.8% |
 | DE (prefetch+refresh) | — | — | — | 87.9% | — |
 | MLP Graph | 99.8% | 99.8% | 99.8% | 99.8% | 99.8% |
 
-†Cosine router PPL evaluation failed silently on T4×2 (`lm_head` on cuda:1); no result written.
-
 **Key observations (1B):** Static Top-K is near-random (<8% at K=10k). Cluster saturates at 83%. Cosine acceptance is flat at 98.4% across all K values. Dual-Encoder (step) and MLP Graph achieve 99.5% and ≥99.9% respectively, essentially independent of K above 512.
 
-**Key observations (8B):** DE (step) and MLP Graph transfer perfectly, both achieving **99.8%** acceptance at all K. Cluster improves to 85.2% at K=10k (vs. 83.3% on 1B). Static Top-K remains near-random.
+**Key observations (8B):** DE (step) and MLP Graph transfer perfectly, both achieving **99.8%** acceptance at all K. Cosine achieves 98.2% acceptance — flat across all K, the same information-theoretic ceiling behaviour as on 1B (98.4%). Cluster improves to 85.2% at K=10k (vs. 83.3% on 1B). Static Top-K remains near-random.
 
 ![Token acceptance rate vs. shortlist size K for all routers.](../results/acceptance_rate_vs_k.png)
 
@@ -214,17 +212,18 @@ The `lm_head` accounts for 6.1% of per-token latency on the 1B model and 4.69% o
 | MLP Graph | +39.594 | +13.225 | +6.391 | +2.891 | **+2.105** |
 | Attention Graph | +15,025 | +21.580 | +5.908 | +2.104 | **+1.327** |
 
-**8B model** (baseline PPL = 16.63; Static Top-K and Cluster omitted — extreme values ≫10³; Cosine N/A†):
+**8B model** (baseline PPL = 16.63; Static Top-K and Cluster omitted — extreme values ≫10³):
 
 | Router | K=512 | K=1k | K=2k | K=5k | K=10k |
 |--------|------:|-----:|-----:|-----:|------:|
+| Cosine | +5.05 | +3.21 | +2.43 | +1.40 | **+1.01** |
 | Dual-Encoder (step) | +6.63 | +2.09 | +1.15 | +0.55 | **+0.29** |
 | DE (prefetch+refresh)† | — | — | — | +122.85 | — |
 | MLP Graph | +10.82 | +3.57 | +2.10 | +1.20 | **+0.82** |
 
 †Effective K≈4,634 (1B) / 4,112 (8B) averaged over the evaluation.
 
-**Key observations:** At K=10k on 1B, the best methods cluster closely: DE step (+1.03), Attention Graph (+1.33), MLP Graph (+2.11), Cosine (+2.73). On the 8B model, quality improves significantly at the same K: DE (step) at K=10k reaches ΔPPL=**+0.29** (vs. +1.03 on 1B), and MLP Graph reaches **+0.82** (vs. +2.11). This improvement likely reflects the higher-capacity 8B model producing a richer hidden state that the router can use more precisely.
+**Key observations:** At K=10k on 1B, the best methods cluster closely: DE step (+1.03), Attention Graph (+1.33), MLP Graph (+2.11), Cosine (+2.73). On the 8B model, quality improves significantly at the same K: Cosine at K=10k achieves ΔPPL=**+1.01** (vs. +2.73 on 1B), DE (step) at K=10k reaches ΔPPL=**+0.29** (vs. +1.03 on 1B), and MLP Graph reaches **+0.82** (vs. +2.11). This improvement likely reflects the higher-capacity 8B model producing a richer hidden state that the router can use more precisely.
 
 ![Perplexity degradation (ΔPPL) vs. shortlist size K. Static Top-K and Cluster are omitted from this plot due to extreme values.](../results/ppl_degradation_vs_k.png)
 
@@ -250,11 +249,12 @@ The `lm_head` accounts for 6.1% of per-token latency on the 1B model and 4.69% o
 | **Baseline** | — | — | — | — | 11.48 | — |
 | Static Top-K | 11.31 | 11.33 | 11.32 | 11.28 | 11.21 | −1% to −2% |
 | Cluster | 11.16 | 11.16 | 11.15 | 11.11 | 11.04 | −3% to −4% |
+| Cosine | 10.50 | 10.50 | 10.49 | 10.46 | 10.40 | −9% to −10% |
 | DE (prefetch+refresh) | — | — | — | 11.26 | — | −2% |
 | Dual-Encoder (step) | 10.17 | 10.15 | 10.10 | 10.00 | 9.89 | −11% to −14% |
 | MLP Graph | 10.23 | 10.22 | 10.17 | 10.06 | 9.94 | −11% to −13% |
 
-On the 1B model, the DE (prefetch+refresh) variant is the only pruned method to exceed baseline throughput (+4%, 27.67 tok/s), by amortising router cost across many decoding steps — though at a severe quality penalty (+146 PPL). On the 8B model, the overhead gap narrows compared to 1B: DE (step) costs −11% to −14% (vs. −13% to −16% on 1B), consistent with the break-even analysis in Section 6.3.
+On the 1B model, the DE (prefetch+refresh) variant is the only pruned method to exceed baseline throughput (+4%, 27.67 tok/s), by amortising router cost across many decoding steps — though at a severe quality penalty (+146 PPL). On the 8B model, the overhead gap narrows compared to 1B: DE (step) costs −11% to −14% (vs. −13% to −16% on 1B). Cosine incurs −9% to −10% overhead on 8B — the same relative cost as on 1B, consistent with its fixed brute-force matmul over W_V. The gap is consistent with the break-even analysis in Section 6.3.
 
 ![Wall-clock tokens/sec vs. shortlist size K. Dashed line = full-vocab baseline.](../results/throughput_vs_k.png)
 
