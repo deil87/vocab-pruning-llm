@@ -36,6 +36,8 @@ def build_mlp_transition_graph(model, lm_head_weight: torch.Tensor):
             h = lm_head_weight[start:end].to(DEVICE).to(model.dtype)  # [B, d]
 
             for mlp in mlp_layers:
+                mlp_dev = next(mlp.parameters()).device
+                h = h.to(mlp_dev)
                 h = h + mlp(h)
 
             logits = h.float().to(model.lm_head.weight.device) @ model.lm_head.weight.float().T  # [B, V]
