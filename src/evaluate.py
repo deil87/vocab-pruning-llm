@@ -169,7 +169,7 @@ def compute_perplexity_cosine(
             for t in range(T):
                 shortlist = topk_idx[t]                   # [k] on DEVICE
                 h_t = h_all[t]                            # [d] on lm_head device
-                pruned_w = model.lm_head.weight.float()[shortlist]  # [k, d] on lm_head device
+                pruned_w = model.lm_head.weight.float()[shortlist.to(model.lm_head.weight.device)]  # [k, d] on lm_head device
                 logits = h_t.to(pruned_w.device) @ pruned_w.T  # [k] on lm_head device
                 target = targets[0, t].item()
 
