@@ -29,10 +29,12 @@ def main():
     lm_head_weight = lm_head_cpu_fp32(model)           # [V, d] float32 CPU
     static_sorted_idx = build_static_index(lm_head_weight)
 
-    # Precompute normalised lm_head on DEVICE (float32) — used by cosine router
-    lm_head_norm_dev = F.normalize(
-        model.lm_head.weight.float(), dim=-1
-    )  # [V, d] float32 on DEVICE — stays there for fast matmuls
+    # Precompute normalised lm_head on cuda:0 (float32) — used by cosine router.
+    # Force .to("cuda:0") so the matmul against hidden states (always on cuda:0)
+    # works correctly under device_map="auto" where lm_head may land on cuda:1.
+    _lm_head_f32 = model.lm_head.weight.float()
+    _lm_head_dev0 = _lm_head_f32.to(next(model.parameters()).device)  # first param device = cuda:0
+    lm_head_norm_dev = F.normalize(_lm_head_dev0, dim=-1)  # [V, d] float32 on cuda:0
 
     # ── Static router ──────────────────────────────────────────────────────────
     if not CFG.static_csv.exists():
