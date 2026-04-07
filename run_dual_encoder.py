@@ -16,6 +16,7 @@ from src.dual_encoder import (
 from src.routers import get_dual_encoder_shortlist, prefetch_shortlist, refresh_shortlist
 from src.evaluate import evaluate_router, compute_perplexity, evaluate_prefetch_router, compute_perplexity_prefetch
 from src.logging_utils import setup_logging
+from src.router_kernel import build_fused_router, build_completion_token_tensor
 
 
 def main():
@@ -55,23 +56,48 @@ def main():
     completion_index_proj = project_completion_index(key_projector, completion_index, device=DEVICE)
     print(f"  Projected index shape: {completion_index_proj.shape}, device: {completion_index_proj.device}")
 
-    # Move router to DEVICE for GPU-native inference (eliminates CPU round-trip)
+    # Move router to DEVICE for GPU-native inference
     router = router.to(DEVICE)
 
-    # Closure helpers
+    # ── Build GPU-native fast-path components (Changes 1, 2, 3) ───────────────
+    print("\nBuilding GPU-native fused router…")
+    fused_router = build_fused_router(
+        router_mlp=router,
+        completion_index_proj=completion_index_proj,
+        n_retrieve=CFG.n_retrieve,
+    )
+    triton_status = "Triton kernel" if fused_router.use_triton else "PyTorch fast-path"
+    print(f"  Fused router ready ({triton_status})")
+
+    print("Building GPU completion token tensor…")
+    completion_token_tensor = build_completion_token_tensor(completion_token_lists, device=DEVICE)
+    print(f"  Shape: {completion_token_tensor.shape}, device: {completion_token_tensor.device}")
+
+    vocab_size = model.lm_head.weight.shape[0]
+
+    # Closure helpers — fast path (no CPU round-trips, GPU-native union)
     def de_shortlist(h, k):
         return get_dual_encoder_shortlist(
-            h, router, completion_index_proj, completion_token_lists, lm_head_norm_dev, k
+            h, router, completion_index_proj, completion_token_lists, lm_head_norm_dev, k,
+            fused_router=fused_router,
+            completion_token_tensor=completion_token_tensor,
+            vocab_size=vocab_size,
         )
 
     def _prefetch(prompt_ids):
         return prefetch_shortlist(
-            model, prompt_ids, router, completion_index_proj, completion_token_lists
+            model, prompt_ids, router, completion_index_proj, completion_token_lists,
+            fused_router=fused_router,
+            completion_token_tensor=completion_token_tensor,
+            vocab_size=vocab_size,
         )
 
     def _refresh(shortlist, h_T):
         return refresh_shortlist(
-            shortlist, h_T, router, completion_index_proj, completion_token_lists
+            shortlist, h_T, router, completion_index_proj, completion_token_lists,
+            fused_router=fused_router,
+            completion_token_tensor=completion_token_tensor,
+            vocab_size=vocab_size,
         )
 
     # ── Step-level evaluation ──────────────────────────────────────────────────

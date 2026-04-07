@@ -32,8 +32,12 @@ def evaluate_router(
     max_new_tokens: int = CFG.bench_max_new_tokens,
 ) -> Dict:
     """
-    Greedy decode with a pruned vocabulary supplied by router_fn(hidden_cpu, k).
-    router_fn must return a 1-D LongTensor of token indices.
+    Greedy decode with a pruned vocabulary supplied by router_fn(hidden, k).
+
+    router_fn receives hidden[0] — a [d] tensor on DEVICE (float16/bfloat16).
+    Routers that previously required a CPU float32 tensor now accept GPU tensors
+    directly; the fast-path router_fn (FusedRouter) never moves data off-GPU.
+    Legacy router_fns that still need CPU can call .cpu() internally.
     Returns latency + acceptance rate metrics.
     """
     accepted, total_steps = 0, 0
@@ -53,17 +57,17 @@ def evaluate_router(
                     use_cache=True,
                     output_hidden_states=True,
                 )
-                hidden = out.hidden_states[-1][:, -1, :]
+                hidden = out.hidden_states[-1][:, -1, :]   # [1, d] on DEVICE
                 past_key_values = out.past_key_values
 
                 lm_dev = model.lm_head.weight.device
                 full_logits = hidden.to(lm_dev) @ model.lm_head.weight.T
                 gold_token = full_logits[0].argmax().item()
 
-                hidden_cpu = hidden[0].float().cpu()
-                shortlist = router_fn(hidden_cpu, k)
+                # Pass GPU tensor directly — no CPU round-trip (Change 1)
+                shortlist = router_fn(hidden[0], k)
 
-                pruned_weight = model.lm_head.weight[shortlist]  # on lm_dev
+                pruned_weight = model.lm_head.weight[shortlist.to(lm_dev)]  # on lm_dev
                 t_lm0 = time.perf_counter()
                 pruned_logits = hidden.to(lm_dev) @ pruned_weight.T
                 _sync(lm_dev)
@@ -320,18 +324,18 @@ def evaluate_prefetch_router(
                     use_cache=True,
                     output_hidden_states=True,
                 )
-                hidden = out.hidden_states[-1][:, -1, :]
+                hidden = out.hidden_states[-1][:, -1, :]   # [1, d] on DEVICE
                 past_key_values = out.past_key_values
-                h_cpu = hidden[0].float().cpu()
+                h_gpu = hidden[0]  # [d] on DEVICE — no CPU copy (Change 1)
 
                 lm_dev = model.lm_head.weight.device
                 full_logits = hidden.to(lm_dev) @ model.lm_head.weight.T
                 gold_token = full_logits[0].argmax().item()
 
                 if generated_count > 0 and generated_count % refresh_every == 0:
-                    shortlist = refresh_fn(shortlist, h_cpu)
+                    shortlist = refresh_fn(shortlist, h_gpu)
 
-                pruned_weight = model.lm_head.weight[shortlist]  # on lm_dev
+                pruned_weight = model.lm_head.weight[shortlist.to(lm_dev)]  # on lm_dev
                 t_lm0 = time.perf_counter()
                 pruned_logits = hidden.to(lm_dev) @ pruned_weight.T
                 _sync(lm_dev)

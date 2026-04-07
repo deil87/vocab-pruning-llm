@@ -1,5 +1,5 @@
 """All shortlist / router functions."""
-from typing import List
+from typing import List, Optional
 
 import torch
 import torch.nn.functional as F
@@ -70,13 +70,36 @@ def get_dual_encoder_shortlist(
     completion_token_lists: List[torch.Tensor],
     lm_head_norm_dev: torch.Tensor,
     k: int,
+    # Optional GPU-native acceleration (Change 1 + 2)
+    fused_router=None,
+    completion_token_tensor: Optional[torch.Tensor] = None,
+    vocab_size: Optional[int] = None,
 ) -> torch.Tensor:
     """
-    hidden: [d] any device/dtype.
+    hidden: [d] — any device/dtype.  Kept on GPU when fused_router is provided.
     lm_head_norm_dev: F.normalize(lm_head.weight.float(), dim=-1) [V, d] on DEVICE.
-    1. RouterMLP → query; 2. retrieve top-N completions; 3. union token IDs;
-    4. pad with cosine-nearest if union < k.
+
+    Fast path (fused_router + completion_token_tensor provided):
+      - No GPU→CPU→GPU round-trip for h_T
+      - GPU-native token union via boolean mask scatter
+      - MLP + similarity fused (Triton if available, else PyTorch)
+
+    Slow path (legacy): CPU list comprehension, unchanged behaviour.
     """
+    if fused_router is not None and completion_token_tensor is not None:
+        # ── Fast path ────────────────────────────────────────────────────────
+        from src.router_kernel import gpu_token_union
+        h_dev = hidden.to(DEVICE).float()
+        if h_dev.dim() == 2:
+            h_dev = h_dev.squeeze(0)
+        with torch.no_grad():
+            top_idx = fused_router(h_dev)   # [n_retrieve] on GPU, no CPU round-trip
+        vs = vocab_size or lm_head_norm_dev.shape[0]
+        return gpu_token_union(
+            completion_token_tensor, top_idx, vs, k, lm_head_norm_dev, h_dev
+        )
+
+    # ── Slow / legacy path ────────────────────────────────────────────────────
     h_dev = hidden.to(DEVICE).float()
     with torch.no_grad():
         q = router(h_dev.unsqueeze(0)).squeeze(0)              # [d_r] on DEVICE
@@ -108,16 +131,45 @@ def prefetch_shortlist(
     router,
     completion_index_proj: torch.Tensor,
     completion_token_lists: List[torch.Tensor],
+    # Optional GPU-native acceleration
+    fused_router=None,
+    completion_token_tensor: Optional[torch.Tensor] = None,
+    vocab_size: Optional[int] = None,
 ) -> torch.Tensor:
     """
     Single forward pass over full prompt → batch RouterMLP → union of token IDs.
     Returns 1-D LongTensor.
+
+    Fast path: if fused_router + completion_token_tensor are provided, the
+    per-position top-K retrieval stays on GPU and the union is built via
+    boolean mask scatter (no CPU loop, no round-trips).
     """
     router.eval()
     with torch.no_grad():
         ids = prompt_ids.unsqueeze(0).to(DEVICE)
         out = model(input_ids=ids, output_hidden_states=True)
         all_h = out.hidden_states[-1][0].float().to(DEVICE)   # [T, d] on DEVICE
+
+        if fused_router is not None and completion_token_tensor is not None:
+            # Fast path: batched matmul stays on GPU
+            q_all = router(all_h)                              # [T, d_r] on DEVICE
+            sims = q_all @ completion_index_proj.T             # [T, N] on DEVICE
+            top_idx_gpu = sims.topk(CFG.n_retrieve, dim=1).indices  # [T, n_retrieve] GPU
+
+            vs = vocab_size or completion_token_tensor.shape[0]
+            mask = torch.zeros(
+                completion_index_proj.shape[0] if vs is None else vs,
+                dtype=torch.bool, device=DEVICE
+            )
+            # Flatten all retrieved completion indices → gather token IDs
+            flat_idx = top_idx_gpu.reshape(-1)                 # [T * n_retrieve]
+            retrieved = completion_token_tensor[flat_idx]      # [T*n_retrieve, comp_len]
+            vs2 = vocab_size or completion_token_tensor.max().item() + 1
+            mask2 = torch.zeros(vs2, dtype=torch.bool, device=DEVICE)
+            mask2.scatter_(0, retrieved.reshape(-1), True)
+            return mask2.nonzero(as_tuple=False).squeeze(1)
+
+        # Legacy path
         queries = router(all_h)                                # [T, d_r] on DEVICE
         sims = queries @ completion_index_proj.T               # [T, N] on DEVICE
         top_idx = sims.topk(CFG.n_retrieve, dim=1).indices.cpu()  # [T, N_RETRIEVE] CPU
@@ -136,10 +188,35 @@ def refresh_shortlist(
     router,
     completion_index_proj: torch.Tensor,
     completion_token_lists: List[torch.Tensor],
+    # Optional GPU-native acceleration
+    fused_router=None,
+    completion_token_tensor: Optional[torch.Tensor] = None,
+    vocab_size: Optional[int] = None,
 ) -> torch.Tensor:
-    """Union-expand shortlist using h_T from the most recently generated token."""
+    """Union-expand shortlist using h_T from the most recently generated token.
+
+    Fast path: h_T stays on GPU, union built via boolean mask scatter.
+    """
     router.eval()
     with torch.no_grad():
+        if fused_router is not None and completion_token_tensor is not None:
+            h_dev = h_T.to(DEVICE).float()
+            if h_dev.dim() == 2:
+                h_dev = h_dev.squeeze(0)
+            top_idx_gpu = fused_router(h_dev)                  # [n_retrieve] on GPU
+            retrieved = completion_token_tensor[top_idx_gpu]   # [n_retrieve, comp_len]
+            vs = vocab_size or retrieved.max().item() + 1
+            mask = torch.zeros(vs, dtype=torch.bool, device=DEVICE)
+            mask.scatter_(0, retrieved.reshape(-1), True)
+            new_ids = mask.nonzero(as_tuple=False).squeeze(1)  # on GPU
+            # Union with current_shortlist
+            cur = current_shortlist.to(DEVICE)
+            mask2 = torch.zeros(vs, dtype=torch.bool, device=DEVICE)
+            mask2[cur] = True
+            mask2[new_ids] = True
+            return mask2.nonzero(as_tuple=False).squeeze(1)
+
+        # Legacy path
         q = router(h_T.to(DEVICE).float().unsqueeze(0)).squeeze(0)  # [d_r] on DEVICE
         sims = completion_index_proj @ q                             # [N] on DEVICE
         top_idx = sims.topk(CFG.n_retrieve).indices.cpu()           # [N_RETRIEVE] CPU
