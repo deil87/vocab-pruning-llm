@@ -71,21 +71,6 @@ except ImportError:
 
 if _TRITON_AVAILABLE:
 
-    def _gelu_approx(x):
-        """
-        Inline GELU helper for use inside @triton.jit kernels.
-        Uses only tl.exp — available in all Triton versions (no tl.libdevice /
-        tl.math dependency).  The tanh is computed as:
-            tanh(z) = (exp(2z) - 1) / (exp(2z) + 1)
-        which is numerically equivalent and version-agnostic.
-        GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
-        """
-        c = 0.7978845608028654  # sqrt(2/pi)
-        z = c * (x + 0.044715 * x * x * x)
-        exp2z = tl.exp(2.0 * z)
-        tanh_z = (exp2z - 1.0) / (exp2z + 1.0)
-        return 0.5 * x * (1.0 + tanh_z)
-
     @triton.jit
     def _mlp_forward_kernel(
         # Input
@@ -147,8 +132,12 @@ if _TRITON_AVAILABLE:
             idx_mask = (h1_range == i)
             x1 = x1 + tl.where(idx_mask, dot + b1_i, 0.0)
 
-        # GELU activation
-        x1 = _gelu_approx(x1)
+        # GELU activation — inlined, tl.exp only (no tl.libdevice / tl.math)
+        # tanh(z) = (exp(2z)-1)/(exp(2z)+1)
+        _gelu_c = 0.7978845608028654  # sqrt(2/pi)
+        _z1 = _gelu_c * (x1 + 0.044715 * x1 * x1 * x1)
+        _e1 = tl.exp(2.0 * _z1)
+        x1 = 0.5 * x1 * (1.0 + (_e1 - 1.0) / (_e1 + 1.0))
 
         # LayerNorm 1
         mean1 = tl.sum(x1, axis=0) / H
@@ -167,7 +156,9 @@ if _TRITON_AVAILABLE:
             idx_mask2 = (h1_range == i)
             x2 = x2 + tl.where(idx_mask2, dot2 + b2_i, 0.0)
 
-        x2 = _gelu_approx(x2)
+        _z2 = _gelu_c * (x2 + 0.044715 * x2 * x2 * x2)
+        _e2 = tl.exp(2.0 * _z2)
+        x2 = 0.5 * x2 * (1.0 + (_e2 - 1.0) / (_e2 + 1.0))
 
         # LayerNorm 2
         mean2 = tl.sum(x2, axis=0) / H
