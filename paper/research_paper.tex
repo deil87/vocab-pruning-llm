@@ -203,19 +203,14 @@ $128{,}256 \times 2{,}048 \times 2\,\text{bytes} = \mathbf{525\,\text{MB}}$.
 Reading 525\,MB per token step creates a hard ceiling on achievable
 tokens/sec independent of model depth.
 
-\subsection{Speculative Decoding and Related Work}
+\subsection{Related Work}
 
-\textbf{Speculative decoding}~\cite{leviathan2023,chen2023} accelerates
-autoregressive generation by interposing a small draft model that proposes
-candidate tokens. A large verifier model evaluates the entire candidate
-sequence in a single parallel forward pass.
-
-Extensions include \textbf{Medusa}~\cite{cai2024}, which attaches multiple
-decoding heads to the base model, and \textbf{tree-based speculative
-decoding}, which generates a tree of candidate sequences from multiple draft
-models. Our approach is orthogonal to all of these: it targets the
-\code{lm\_head} projection cost directly and can be combined with any of the
-above methods.
+\textbf{Speculative decoding}~\cite{leviathan2023,chen2023} and attention
+optimisations such as Flash Attention address orthogonal bottlenecks in
+autoregressive inference. Our approach targets the \code{lm\_head} projection
+cost directly and is complementary to both: vocabulary pruning can be applied
+on top of any attention kernel and does not interfere with draft-model
+verification.
 
 \subsection{Dual-Encoders and Contrastive Learning}
 
@@ -680,85 +675,6 @@ The attention graph's quality ($\Delta$PPL=+1.33 on 1B) is second-best after
 DE step. A CUDA-native implementation reading pre-computed attention patterns
 without re-running attention would recover this overhead.
 
-\subsection{Speculative Decoding via Retrieval}
-
-Two speculative decoding approaches were implemented and benchmarked.
-
-\subsubsection{Chain-based (v1)}
-Token 1 selected from the combined Attn+Graph shortlist argmax; tokens 2..D
-from a 1-hop graph walk. The full model runs two forward passes per step, and
-\code{output\_attentions=True} forces eager attention throughout.
-
-\begin{table}[h]
-\centering
-\caption{Chain-based speculative decoding results (T4 GPU).}
-\label{tab:spec-v1}
-\small
-\begin{tabular}{@{}lrrr@{}}
-\toprule
-\tblhead{Config} & \tblhead{Tok/s} & \tblhead{Draft acc.} & \tblhead{Speedup} \\
-\midrule
-Cosine ($D{=}4$)          & 2.92  & 27.7\% & $0.11{\times}$ \\
-Attn+Graph ($D{=}4$)      & 2.88  & 28.1\% & $0.11{\times}$ \\
-\textbf{Full-vocab baseline} & \textbf{26.60} & --- & \textbf{1.0×} \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-At 2.88--2.92\,tok/s this is ${\sim}$11\% of baseline. Two compounding
-factors: (1) two full forward passes per step with no parallelism gain;
-(2) \code{output\_attentions=True} adding eager-attention overhead per step.
-
-\begin{figure}[H]
-\centering
-\includegraphics[width=\columnwidth]{../results/speculative_decoding_sweep.png}
-\caption{Speculative decoding (chain-based v1): effective tok/s and draft
-  acceptance rate vs.\ draft length $D$.}
-\label{fig:spec-v1}
-\end{figure}
-
-\subsubsection{Retrieval-based (v2)}
-An offline index of 50k completion sequences (8 tokens each) is built by
-extracting $h_T$ at split points across WikiText-2 training windows. At
-inference time: (1) one probe forward pass with KV-cache captures $h_T$;
-(2) top-$K$ completions retrieved by cosine similarity; (3) each candidate
-verified using the cached KV-cache --- $O(D)$ attention cost instead of
-$O(T+D)$. No \code{output\_attentions}; standard SDPA throughout.
-
-\begin{table}[h]
-\centering
-\caption{Retrieval-based speculative decoding (v2) sweep results (T4 GPU).}
-\label{tab:spec-v2}
-\small
-\begin{tabular}{@{}rrrrrr@{}}
-\toprule
-\tblhead{K} & \tblhead{D} & \tblhead{Tok/s} & \tblhead{Tok/step} & \tblhead{Draft acc.} & \tblhead{Speedup} \\
-\midrule
- 4 &  4 & 2.44 & 1.19 & 1.2\% & $0.09{\times}$ \\
- 4 &  8 & 2.38 & 1.16 & 0.5\% & $0.09{\times}$ \\
- 4 & 16 & 2.38 & 1.16 & 0.3\% & $0.09{\times}$ \\
- 8 &  4 & 1.63 & 1.27 & 0.8\% & $0.06{\times}$ \\
- 8 &  8 & 1.58 & 1.24 & 0.4\% & $0.06{\times}$ \\
- 8 & 16 & 1.58 & 1.24 & 0.2\% & $0.06{\times}$ \\
-16 &  4 & 1.03 & 1.40 & 0.6\% & $0.04{\times}$ \\
-16 &  8 & 0.97 & 1.34 & 0.3\% & $0.04{\times}$ \\
-16 & 16 & 0.97 & 1.34 & 0.1\% & $0.04{\times}$ \\
-32 &  4 & 0.63 & 1.59 & 0.5\% & $0.02{\times}$ \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The KV-cache fix eliminated the $O(T^2)$ quadratic cost from v1, improving
-throughput to 0.63--2.44\,tok/s. However, draft acceptance rates collapsed to
-\textbf{0.1--1.2\%} --- far below the ${\sim}$70--80\% needed for speculative
-speedup. The root cause is a \textbf{retrieval signal mismatch}: the index
-embeds prefix hidden states from an offline training-data pass, while at
-inference time $h_T$ is a function of the full prompt history. The dot-product
-similarity is insufficient to recover semantically valid continuations, so
-nearly every draft token is rejected. The retrieval signal needs to be
-\emph{discriminatively trained}, not borrowed from the LLM's general-purpose
-representation.
-
 \subsection{Cost Analysis}
 
 Using GPU on-demand pricing (A100 @ \$3.00/hr = \$0.000833/s):
@@ -779,16 +695,15 @@ DE (step)    &  5k & 23.16 & \$35.99  & $+15\%$ \\
 DE (step)    & 10k & 22.39 & \$37.22  & $+19\%$ \\
 MLP Graph    & 10k & 22.83 & \$36.50  & $+16\%$ \\
 Attn Graph   & 10k & 19.98 & \$41.72  & $+33\%$ \\
-Spec (v1)    & D=4 &  2.88 & $\sim$\$289 & $+822\%$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-On GPU the cost overhead of pruned methods is much more modest than on
-memory-limited hardware: 12--33\% above baseline for the viable methods.
-Break-even between router cost and \code{lm\_head} savings still requires a
-larger model (see Section~\ref{sec:lmhead-fraction}), but the arithmetic is
-less unfavourable on GPU.
+On GPU the cost overhead of pruned methods is modest: 12--33\% above
+baseline for the viable methods. Break-even between router cost and
+\code{lm\_head} savings still requires a larger model (see
+Section~\ref{sec:lmhead-fraction}), but the arithmetic is less unfavourable
+on GPU than on memory-limited hardware.
 
 % ────────────────────────────────────────────────────────────
 \section{Discussion}
@@ -880,39 +795,14 @@ Reducing \code{lm\_head} traffic by 92\% matters for edge deployment (models
 that barely fit in VRAM) and for batched inference where memory bandwidth is
 the binding resource.
 
-\subsection{Speculative Decoding via Retrieval}
-
-Two implementations were evaluated. The chain-based v1 achieved 28\% draft
-acceptance while penalised by two full forward passes per step and eager
-attention overhead. The retrieval-based v2 eliminated both overhead sources
-via KV-cache reuse and standard SDPA, but draft acceptance collapsed to
-0.2--1.1\%. Key factors:
-
-\begin{enumerate}[leftmargin=*, itemsep=1pt, topsep=2pt]
-  \item \textbf{Retrieval signal mismatch.} Index embeddings are from
-        offline training-data prefixes; inference-time $h_T$ differs
-        systematically. Cosine similarity is low-signal for valid continuations.
-  \item \textbf{No discriminative training.} The index uses general-purpose
-        LLM representations, not representations trained to distinguish
-        accepted from rejected draft sequences.
-  \item \textbf{Sequential verifier passes.} A tree-structured verifier pass
-        over all $K$ candidates in a single batched forward pass (Option C)
-        would reduce per-step cost from $O(K \cdot D)$ to $O(D)$.
-\end{enumerate}
-
-The underlying architecture --- retrieval of completion sequences, KV-cache
-reuse in the verifier, standard SDPA --- is sound. The missing ingredient is a
-discriminatively trained retrieval model.
-
 % ────────────────────────────────────────────────────────────
 \section{Conclusion and Future Work}
 % ────────────────────────────────────────────────────────────
 
-We implemented and benchmarked six vocabulary pruning strategies and two
-retrieval-based speculative decoders against a full-vocabulary baseline on
-both \code{Llama-3.2-1B-Instruct} (NVIDIA T4, single GPU) and
-\code{Llama-3.1-8B-Instruct} (two NVIDIA T4 GPUs, \code{device\_map="auto"}),
-using WikiText-2.
+We implemented and benchmarked six vocabulary pruning strategies against a
+full-vocabulary baseline on both \code{Llama-3.2-1B-Instruct} (NVIDIA T4,
+single GPU) and \code{Llama-3.1-8B-Instruct} (two NVIDIA T4 GPUs,
+\code{device\_map="auto"}), using WikiText-2.
 
 \textbf{The memory bandwidth result is the genuine contribution.} Pruning
 \code{lm\_head} to K=10k reduces the weight matrix loaded per step from
@@ -937,13 +827,6 @@ reaches $\Delta$PPL=+0.29 on 8B vs.\ +1.03 on 1B. This confirms the routing
 approach is robust to model scale; the throughput bottleneck is the overhead
 budget, not acceptance quality.
 
-\textbf{Speculative decoding via retrieval} was evaluated in two
-implementations. The chain-based v1 achieved 2.88\,tok/s (11\% of baseline)
-with 28\% draft acceptance. The retrieval-based v2 removed both overhead
-sources but draft acceptance collapsed to 0.1--1.2\% due to retrieval signal
-mismatch. A useful retrieval-based speculative decoder requires a
-\emph{discriminatively trained} retrieval model.
-
 \textbf{Future work:}
 \begin{itemize}[leftmargin=*, itemsep=1pt, topsep=2pt]
   \item \textbf{GPU-native router kernel.} Implement the DE router as a fused
@@ -954,10 +837,6 @@ mismatch. A useful retrieval-based speculative decoder requires a
         overhead; extend to 70B+ where break-even is predicted.
   \item \textbf{INSTRUCTOR-style router.} Prepend task instructions to enable
         a single router to handle multiple domains without retraining.
-  \item \textbf{Discriminative retrieval for speculative decoding.} Train a
-        contrastive retrieval model on accepted vs.\ rejected draft sequences.
-        Combined with a compact Medusa head for verification, this is the most
-        promising path to retrieval-based speculative speedup.
   \item \textbf{Online router adaptation.} Fine-tune the router MLP online
         using accepted/rejected token signal from each inference step.
 \end{itemize}
@@ -965,12 +844,6 @@ mismatch. A useful retrieval-based speculative decoder requires a
 % ────────────────────────────────────────────────────────────
 \bibliographystyle{plain}
 \begin{thebibliography}{9}
-
-\bibitem{cai2024}
-T.~Cai et al.
-\newblock Medusa: Simple LLM inference acceleration framework with multiple
-  decoding heads.
-\newblock 2024.
 
 \bibitem{chen2023}
 C.~Chen et al.

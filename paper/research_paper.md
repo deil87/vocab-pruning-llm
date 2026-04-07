@@ -61,9 +61,9 @@ $$\text{logits} = h_T W_V^\top \in \mathbb{R}^{|V|}$$
 
 where $W_V \in \mathbb{R}^{|V| \times d}$ is the vocabulary embedding matrix and $|V|$ is the vocabulary size (128,256 for both Llama-3.2-1B and Llama-3.1-8B). At 16-bit precision, $W_V$ occupies 525 MB (1B) or 1,049 MB (8B). Reading this per token step creates a hard ceiling on achievable tokens/sec independent of model depth.
 
-### 2.3 Speculative Decoding and Related Work
+### 2.3 Related Work
 
-**Speculative decoding** (Leviathan et al., 2023; Chen et al., 2023) accelerates autoregressive generation by interposing a small "draft" model that proposes several candidate tokens. A large "verifier" model evaluates the entire candidate sequence in a single parallel forward pass. Extensions include **Medusa** (Cai et al., 2024) and tree-based speculative decoding. Our approach is orthogonal: it targets the `lm_head` projection cost directly and can be combined with any of the above methods.
+**Speculative decoding** (Leviathan et al., 2023; Chen et al., 2023) and attention optimisations such as Flash Attention address orthogonal bottlenecks in autoregressive inference. Our approach targets the `lm_head` projection cost directly and is complementary to both: vocabulary pruning can be applied on top of any attention kernel and does not interfere with draft-model verification.
 
 ### 2.4 Dual-Encoders and Contrastive Learning
 
@@ -292,39 +292,6 @@ On the 8B model, no pruned method exceeds the 11.48 tok/s baseline. The best qua
 
 The attention graph's quality (ΔPPL=+1.33 on 1B) is second-best after DE step. A CUDA-native implementation reading pre-computed attention patterns without re-running attention would recover this overhead.
 
-### 5.7 Speculative Decoding via Retrieval
-
-Two speculative decoding approaches were implemented and benchmarked (1B model only).
-
-#### 5.7.1 Chain-based speculative decoding (v1)
-
-Token 1 selected from the combined Attn+Graph shortlist argmax; tokens 2..D from a 1-hop graph walk. The full model runs two forward passes per step, and `output_attentions=True` forces eager attention throughout.
-
-| Config | Tok/s | Draft acceptance rate | Speedup vs. baseline |
-|--------|------:|----------------------:|---------------------:|
-| Cosine (D=4) | 2.92 | 27.7% | 0.110× |
-| Combined Attn+Graph (D=4) | 2.88 | 28.1% | 0.108× |
-| **Full-vocab baseline** | **26.60** | — | **1.0×** |
-
-At 2.88–2.92 tok/s this is ~11% of baseline. Two compounding factors: (1) two full forward passes per step with no parallelism gain; (2) `output_attentions=True` adding eager-attention overhead per step.
-
-![Speculative decoding (chain-based v1): effective tok/s and draft acceptance rate vs. draft length D.](../results/speculative_decoding_sweep.png)
-
-#### 5.7.2 Retrieval-based speculative decoding (v2)
-
-An offline index of 50,000 completion sequences (8 tokens each) is built. At inference time: (1) one probe forward pass with KV-cache captures `h_T`; (2) top-K completions retrieved by cosine similarity; (3) each candidate verified using the cached KV-cache — O(D) attention cost instead of O(T+D). No `output_attentions`; standard SDPA throughout.
-
-| K | D | Tok/s | Tok/step | Draft acc. | Speedup |
-|--:|--:|------:|---------:|-----------:|--------:|
-| 4 | 4 | 2.44 | 1.19 | 1.2% | 0.092× |
-| 4 | 8 | 2.38 | 1.16 | 0.5% | 0.090× |
-| 8 | 4 | 1.63 | 1.27 | 0.8% | 0.061× |
-| 8 | 8 | 1.58 | 1.24 | 0.4% | 0.060× |
-| 16 | 4 | 1.03 | 1.40 | 0.6% | 0.039× |
-| 32 | 4 | 0.63 | 1.59 | 0.5% | 0.024× |
-
-The KV-cache fix eliminated the O(T²) quadratic cost from v1, but draft acceptance rates collapsed to **0.1–1.2%**. The root cause is a **retrieval signal mismatch**: the index embeds prefix hidden states from an offline training-data pass; inference-time `h_T` differs systematically. The retrieval signal needs to be discriminatively trained.
-
 ### 5.8 Cost Analysis
 
 Using GPU on-demand pricing (A100 @ $3.00/hr = $0.000833/s):
@@ -338,7 +305,6 @@ Using GPU on-demand pricing (A100 @ $3.00/hr = $0.000833/s):
 | DE (step) | 10,000 | 22.39 | $37.22 | +19% |
 | MLP Graph | 10,000 | 22.83 | $36.50 | +16% |
 | Attn Graph | 10,000 | 19.98 | $41.72 | +33% |
-| Spec decoding (v1) | D=4 | 2.88 | ~$289 | +822% |
 
 On GPU the cost overhead of pruned methods is modest: 12–33% above baseline for the viable methods. Break-even between router cost and `lm_head` savings still requires a larger model (see Section 6.3).
 
@@ -391,21 +357,11 @@ On both evaluated models, break-even is not reached. The 8B model's lower measur
 
 Importantly, the **memory bandwidth saving is real at all scales**. Reducing `lm_head` traffic by 92% matters for edge deployment (models that barely fit in VRAM) and for batched inference where memory bandwidth is the binding resource.
 
-### 6.4 Speculative Decoding via Retrieval
-
-Two implementations were evaluated. The chain-based v1 achieved ~28% draft acceptance while penalised by two full forward passes per step and eager attention overhead. The retrieval-based v2 eliminated both overhead sources via KV-cache reuse and standard SDPA, but draft acceptance collapsed to 0.1–1.2%. Key factors:
-
-1. **Retrieval signal mismatch:** index embeddings are from offline training-data prefixes; inference-time `h_T` differs systematically.
-2. **No discriminative training:** the index uses general-purpose LLM representations, not representations trained to distinguish accepted from rejected draft sequences.
-3. **Sequential verifier passes:** a tree-structured verifier pass over all K candidates in a single batched forward pass would reduce per-step cost from O(K·D) to O(D).
-
-The underlying architecture — retrieval of completion sequences, KV-cache reuse in the verifier, standard SDPA — is sound. The missing ingredient is a discriminatively trained retrieval model.
-
 ---
 
 ## 7. Conclusion and Future Work
 
-We implemented and benchmarked six vocabulary pruning strategies and two retrieval-based speculative decoders against a full-vocabulary baseline on both `Llama-3.2-1B-Instruct` (NVIDIA T4, single GPU) and `Llama-3.1-8B-Instruct` (two NVIDIA T4 GPUs, `device_map="auto"`), using WikiText-2.
+We implemented and benchmarked six vocabulary pruning strategies against a full-vocabulary baseline on both `Llama-3.2-1B-Instruct` (NVIDIA T4, single GPU) and `Llama-3.1-8B-Instruct` (two NVIDIA T4 GPUs, `device_map="auto"`), using WikiText-2.
 
 **The memory bandwidth result is the genuine contribution.** Pruning `lm_head` to K=10k reduces the weight matrix loaded per step from 525 MB to 41 MB (1B) or 1,049 MB to 82 MB (8B) — a 92.2% reduction — while DE (step) at K=5k keeps ΔPPL to +1.68 (1B) and **+0.55** (8B) above their respective baselines.
 
@@ -413,21 +369,17 @@ We implemented and benchmarked six vocabulary pruning strategies and two retriev
 
 **Scale generalisation.** DE (step) and MLP Graph transfer perfectly to 8B (99.8% acceptance), and quality improves: DE step K=10k reaches ΔPPL=+0.29 on 8B vs. +1.03 on 1B. This confirms the routing approach is robust to model scale; the throughput bottleneck is the overhead budget, not acceptance quality.
 
-**Speculative decoding via retrieval** was evaluated in two implementations. The chain-based v1 achieved 2.88 tok/s (11% of baseline) with 28% draft acceptance. The retrieval-based v2 removed both overhead sources but draft acceptance collapsed to 0.1–1.2% due to retrieval signal mismatch. A useful retrieval-based speculative decoder requires a *discriminatively trained* retrieval model.
-
 **Future work:**
 
 - **GPU-native router kernel:** implement the DE router as a fused CUDA kernel to reduce overhead from ~7 ms (1B) / ~14 ms (8B) to <1 ms — the key step for making pruning viable on 7B+ models.
 - **Single-GPU 8B / 70B evaluation:** reproduce 8B on a single A100 to isolate the true `lm_head` fraction without sharding overhead; extend to 70B+ where break-even is predicted.
 - **Instruction-tuned router (INSTRUCTOR-style):** prepend task instructions to enable a single router to handle multiple domains without retraining.
-- **Discriminative retrieval for speculative decoding:** train a contrastive retrieval model on accepted vs. rejected draft sequences. Combined with a compact Medusa head for verification, this is the most promising path to retrieval-based speculative speedup.
 - **Online router adaptation:** fine-tune the router MLP online using accepted/rejected token signal from each inference step.
 
 ---
 
 ## References
 
-- Cai, T., et al. (2024). *Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads.*
 - Chen, C., et al. (2023). *Accelerating Large Language Model Decoding with Speculative Sampling.*
 - Henderson, M., et al. (2017). *Efficient Natural Language Response Suggestion for Smart Reply.*
 - Karpukhin, V., et al. (2020). *Dense Passage Retrieval for Open-Domain Question Answering.*
