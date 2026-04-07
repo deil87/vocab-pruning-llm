@@ -46,6 +46,18 @@ try:
     import triton
     import triton.language as tl
     _TRITON_AVAILABLE = True
+
+    # Triton 3.x moved libdevice under tl.extra.cuda.libdevice and also
+    # exposed tl.math.  Triton 2.x used tl.libdevice directly.
+    # Resolve once at import time so the kernel uses the right symbol.
+    try:
+        _tl_tanh = tl.math.tanh          # Triton 3.x preferred path
+    except AttributeError:
+        try:
+            _tl_tanh = tl.extra.cuda.libdevice.tanh   # Triton 3.x alt path
+        except AttributeError:
+            _tl_tanh = tl.libdevice.tanh  # Triton 2.x fallback
+
 except ImportError:
     _TRITON_AVAILABLE = False
 
@@ -76,7 +88,7 @@ if _TRITON_AVAILABLE:
         """Tanh-approximation of GELU, matching torch.nn.GELU default."""
         # GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
         c = 0.7978845608028654  # sqrt(2/pi)
-        return 0.5 * x * (1.0 + tl.libdevice.tanh(c * (x + 0.044715 * x * x * x)))
+        return 0.5 * x * (1.0 + tl.math.tanh(c * (x + 0.044715 * x * x * x)))
 
     @triton.jit
     def _mlp_forward_kernel(
