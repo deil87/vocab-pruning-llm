@@ -41,7 +41,7 @@ def main():
     kmeans.fit(lm_head_weight.numpy())
     cluster_labels = torch.tensor(kmeans.labels_, dtype=torch.long)
     cluster_centers = torch.tensor(kmeans.cluster_centers_, dtype=torch.float32)
-    cluster_centers_norm = F.normalize(cluster_centers, dim=-1)
+    cluster_centers_norm = F.normalize(cluster_centers, dim=-1).to(model.device)
 
     cluster_to_tokens = {
         c: (cluster_labels == c).nonzero(as_tuple=True)[0]
