@@ -46,18 +46,6 @@ try:
     import triton
     import triton.language as tl
     _TRITON_AVAILABLE = True
-
-    # Triton 3.x moved libdevice under tl.extra.cuda.libdevice and also
-    # exposed tl.math.  Triton 2.x used tl.libdevice directly.
-    # Resolve once at import time so the kernel uses the right symbol.
-    try:
-        _tl_tanh = tl.math.tanh          # Triton 3.x preferred path
-    except AttributeError:
-        try:
-            _tl_tanh = tl.extra.cuda.libdevice.tanh   # Triton 3.x alt path
-        except AttributeError:
-            _tl_tanh = tl.libdevice.tanh  # Triton 2.x fallback
-
 except ImportError:
     _TRITON_AVAILABLE = False
 
@@ -83,12 +71,20 @@ except ImportError:
 
 if _TRITON_AVAILABLE:
 
-    @triton.jit
-    def _gelu_kernel_approx(x):
-        """Tanh-approximation of GELU, matching torch.nn.GELU default."""
-        # GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+    def _gelu_approx(x):
+        """
+        Inline GELU helper for use inside @triton.jit kernels.
+        Uses only tl.exp — available in all Triton versions (no tl.libdevice /
+        tl.math dependency).  The tanh is computed as:
+            tanh(z) = (exp(2z) - 1) / (exp(2z) + 1)
+        which is numerically equivalent and version-agnostic.
+        GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+        """
         c = 0.7978845608028654  # sqrt(2/pi)
-        return 0.5 * x * (1.0 + tl.math.tanh(c * (x + 0.044715 * x * x * x)))
+        z = c * (x + 0.044715 * x * x * x)
+        exp2z = tl.exp(2.0 * z)
+        tanh_z = (exp2z - 1.0) / (exp2z + 1.0)
+        return 0.5 * x * (1.0 + tanh_z)
 
     @triton.jit
     def _mlp_forward_kernel(
@@ -152,7 +148,7 @@ if _TRITON_AVAILABLE:
             x1 = x1 + tl.where(idx_mask, dot + b1_i, 0.0)
 
         # GELU activation
-        x1 = _gelu_kernel_approx(x1)
+        x1 = _gelu_approx(x1)
 
         # LayerNorm 1
         mean1 = tl.sum(x1, axis=0) / H
@@ -171,7 +167,7 @@ if _TRITON_AVAILABLE:
             idx_mask2 = (h1_range == i)
             x2 = x2 + tl.where(idx_mask2, dot2 + b2_i, 0.0)
 
-        x2 = _gelu_kernel_approx(x2)
+        x2 = _gelu_approx(x2)
 
         # LayerNorm 2
         mean2 = tl.sum(x2, axis=0) / H
