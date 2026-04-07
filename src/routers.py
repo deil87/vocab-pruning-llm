@@ -51,7 +51,8 @@ def get_cluster_shortlist(hidden: torch.Tensor, cluster_centers_norm: torch.Tens
                           cluster_to_tokens: dict, k: int) -> torch.Tensor:
     """Select clusters by cosine sim to hidden until we have ≥ k tokens."""
     h_norm = F.normalize(hidden.unsqueeze(0), dim=-1)    # [1, d]
-    sims = (h_norm @ cluster_centers_norm.T).squeeze(0)  # [C]
+    cc_norm = cluster_centers_norm.to(device=hidden.device, dtype=hidden.dtype)
+    sims = (h_norm @ cc_norm.T).squeeze(0)               # [C]
     sorted_clusters = sims.argsort(descending=True)
     selected = []
     for c in sorted_clusters.tolist():
