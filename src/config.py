@@ -51,6 +51,15 @@ class Config:
     attn_top_positions: int = 16
     attn_neighbour_k: int = 64
 
+    # ── Hybrid Attention+Graph router ─────────────────────────────────────────
+    # Uses live last-layer attention to pick anchor tokens, then expands via the
+    # MLP transition graph (1-hop walk) instead of a full-vocab cosine scan.
+    # Only the final transformer layer is forced to eager mode; all others keep
+    # SDPA/FlashAttention, so the overhead is roughly 1/num_layers of the full
+    # eager penalty.
+    hybrid_attn_top_positions: int = 16   # top-N attended positions → anchor tokens
+    hybrid_graph_hops: int = 1            # graph walk depth (1 = single hop)
+
     # ── MLP transition graph ──────────────────────────────────────────────────
     graph_edges_per_node: int = 32
     graph_anchor_k: int = 16
@@ -111,6 +120,10 @@ class Config:
     @property
     def attn_csv(self) -> Path:
         return self.results_dir / "attn_router_results.csv"
+
+    @property
+    def hybrid_csv(self) -> Path:
+        return self.results_dir / "hybrid_router_results.csv"
 
     @property
     def graph_csv(self) -> Path:

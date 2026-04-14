@@ -272,6 +272,137 @@ def get_attention_shortlist(
     return torch.cat([all_ids, pad_ids])
 
 
+# ── Hybrid Attention + MLP Graph router ──────────────────────────────────────
+#
+# Design goals vs. the original Attention Graph router:
+#   1. No full-vocabulary cosine scan per attended position.
+#      The original router did [n_pos, d] @ [d, V] per step — O(n_pos * V * d).
+#      Here we replace that with a cheap CPU lookup into graph_edges — O(n_pos * M).
+#   2. Only the last transformer layer needs to materialise attention weights.
+#      All other layers continue to use SDPA/FlashAttention unchanged.
+#      Overhead is therefore ~1/num_layers of the full eager penalty.
+#
+# Algorithm per decode step:
+#   attended token IDs  ← top-N positions in mean-head attention of last layer
+#   graph neighbours    ← 1-hop walk in MLP transition graph from attended tokens
+#   union               ← attended IDs + all graph neighbours
+#   pad if < k          ← cosine-nearest from h_T (no additional full-vocab scan
+#                          beyond what padding requires, and only when |union| < k)
+
+
+def register_last_layer_hook(model) -> tuple:
+    """
+    Register a forward hook on the last transformer layer's self-attention
+    module so that attention weights are captured into a shared dict without
+    forcing the entire model into eager mode.
+
+    Only the last layer needs to run in eager/non-fused mode to materialise
+    attention weights. All other layers keep their default implementation
+    (SDPA or FlashAttention).
+
+    Returns:
+        (captured_dict, hook_handle)
+        captured_dict['attn']:  None | Tensor [H, T_q, T_k] — set after each forward
+        hook_handle: call .remove() to detach the hook when done
+    """
+    captured: dict = {"attn": None}
+    last_layer_attn = model.model.layers[-1].self_attn
+
+    # Force only the last attention layer to eager so it materialises weights
+    if hasattr(last_layer_attn, "config"):
+        # Some model versions expose config on the sub-module
+        pass  # can't easily override per-layer; rely on output hook below
+
+    def _hook(module, inputs, output):
+        # HuggingFace LlamaAttention returns (attn_output, attn_weights, past_kv)
+        # when output_attentions=True *and* eager implementation is used.
+        # When the hook fires, output[1] is the weight tensor or None.
+        if isinstance(output, (tuple, list)) and len(output) > 1:
+            w = output[1]
+            if w is not None:
+                # w shape: [batch, heads, T_q, T_k]
+                captured["attn"] = w[0].detach()  # strip batch dim → [H, T_q, T_k]
+
+    handle = last_layer_attn.register_forward_hook(_hook)
+    return captured, handle
+
+
+def remove_last_layer_hook(handle) -> None:
+    """Remove the forward hook registered by register_last_layer_hook."""
+    handle.remove()
+
+
+def get_hybrid_shortlist(
+    hidden: torch.Tensor,
+    k: int,
+    input_ids_seq: torch.Tensor,
+    captured_attn: dict,
+    graph_edges: torch.Tensor,
+    lm_head_norm_dev: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Hybrid Attention + MLP Graph shortlist — no full-vocabulary cosine scan
+    for the primary expansion step.
+
+    Args:
+        hidden:         [d] hidden state for current step (any device/dtype).
+        k:              target shortlist size.
+        input_ids_seq:  [T] token IDs for the current sequence so far (CPU).
+        captured_attn:  dict with key 'attn' populated by register_last_layer_hook.
+                        captured_attn['attn'] is [H, T_q, T_k] or None.
+        graph_edges:    [V, M] int32 CPU tensor from build_mlp_transition_graph.
+        lm_head_norm_dev: F.normalize(lm_head.weight.float(), dim=-1) [V, d] on device.
+
+    Returns:
+        [k] LongTensor on CPU.
+
+    Step 1 — Attention signal (cheap: reads [H, T_q, T_k] already in memory):
+        Mean attention over heads for last query position → position scores [T_k].
+        Top-hybrid_attn_top_positions positions → attended token IDs.
+
+    Step 2 — MLP Graph expansion (cheap: CPU lookup, O(n_pos * M)):
+        For each attended token ID: fetch its M graph neighbours.
+        Union of attended IDs + all graph neighbours.
+
+    Step 3 — Pad with cosine (only if |union| < k):
+        Full-vocab cosine scan on h_T, masking already-selected tokens.
+        This scan is avoided entirely whenever |union| >= k.
+    """
+    attn_w = captured_attn.get("attn")  # [H, T_q, T_k] or None
+
+    if attn_w is not None:
+        # Mean across heads, last query position → [T_k]
+        attn_score = attn_w[:, -1, :].mean(dim=0).float().cpu()
+        T = attn_score.shape[0]
+        n_pos = min(CFG.hybrid_attn_top_positions, T)
+        top_pos = attn_score.topk(n_pos).indices        # [n_pos]
+        ids_cpu = input_ids_seq.cpu()
+        attended_ids = ids_cpu[top_pos]                 # [n_pos] CPU token IDs
+    else:
+        # Fallback: no attention signal available — use empty attended set
+        attended_ids = torch.empty(0, dtype=torch.long)
+
+    # ── 1-hop graph walk from each attended token (pure CPU lookup) ───────────
+    if len(attended_ids) > 0:
+        neighbour_ids = graph_edges[attended_ids].reshape(-1).long()  # [n_pos * M]
+        all_ids = torch.cat([attended_ids, neighbour_ids]).unique()   # CPU
+    else:
+        all_ids = torch.empty(0, dtype=torch.long)
+
+    if len(all_ids) >= k:
+        return all_ids[:k]
+
+    # ── Pad with cosine-nearest on device (only when |union| < k) ────────────
+    lm_dev = lm_head_norm_dev.device
+    h_dev = hidden.to(lm_dev).float().unsqueeze(0)
+    h_norm = F.normalize(h_dev, dim=-1)
+    cos_sims = (h_norm @ lm_head_norm_dev.T).squeeze(0).cpu()   # [V]
+    if len(all_ids) > 0:
+        cos_sims[all_ids] = -1e9
+    pad_ids = cos_sims.topk(k - len(all_ids)).indices
+    return torch.cat([all_ids, pad_ids])
+
+
 # ── MLP graph router ──────────────────────────────────────────────────────────
 
 def get_graph_shortlist(

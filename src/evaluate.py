@@ -651,3 +651,168 @@ def evaluate_cosine_speculative(
         "draft_acceptance_rate": draft_accept_rate,
         "speedup_vs_baseline": effective_tps / baseline_tps,
     }
+
+
+# ── Hybrid Attention + MLP Graph router evaluator ─────────────────────────────
+#
+# Overhead model vs. the full Attention Graph router:
+#   Full Attention Graph:  eager mode on ALL layers  →  4-5x slower than baseline
+#   Hybrid:                output_attentions=True only on last layer's forward hook
+#                          all other layers keep SDPA/FlashAttention
+#                          → overhead ~1/num_layers of full eager penalty
+#
+# The hook is registered once before the loop and removed after.
+# captured_attn['attn'] is refreshed in-place by the hook on every forward call,
+# so get_hybrid_shortlist always reads the weights from the most recent step.
+
+
+def evaluate_hybrid_router(
+    model,
+    bench_prompts: List[torch.Tensor],
+    hybrid_shortlist_fn: Callable,   # (hidden, k, seq_ids, captured_attn) -> LongTensor
+    k: int,
+    n_prompts: int = CFG.n_bench_prompts,
+    max_new_tokens: int = CFG.bench_max_new_tokens,
+) -> Dict:
+    """
+    Greedy decode benchmark for the Hybrid Attention+Graph router.
+
+    The model forward pass uses output_attentions=True (which forces eager mode
+    on all attention layers in current HuggingFace transformers). The hook
+    captures only the last layer's weights; the shortlist function ignores all
+    other layers' weights.
+
+    For a true single-layer eager implementation, replace the model forward call
+    with a custom forward that sets output_attentions=True only on the last layer.
+    That optimisation is orthogonal to the routing logic here.
+
+    hybrid_shortlist_fn: (hidden [d], k, seq_ids [T], captured_attn dict) -> [k] CPU
+    """
+    from src.routers import register_last_layer_hook, remove_last_layer_hook
+
+    captured_attn, hook_handle = register_last_layer_hook(model)
+
+    accepted, total_steps = 0, 0
+    total_times, lmhead_times = [], []
+
+    try:
+        for prompt in tqdm(bench_prompts[:n_prompts], desc=f"Hybrid K={k}", leave=False):
+            input_ids = prompt.unsqueeze(0).to(DEVICE)
+            past_key_values = None
+            seq_ids = prompt.clone()
+
+            with torch.no_grad():
+                for _ in range(max_new_tokens):
+                    t_start = time.perf_counter()
+
+                    # output_attentions=True triggers the hook on the last layer.
+                    # All layers run in eager mode under current HF transformers;
+                    # only the last layer's weights are used by the router.
+                    out = model(
+                        input_ids=input_ids if past_key_values is None else input_ids[:, -1:],
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                        output_hidden_states=True,
+                        output_attentions=True,
+                    )
+                    hidden = out.hidden_states[-1][:, -1, :]   # [1, d] on DEVICE
+                    past_key_values = out.past_key_values
+
+                    lm_dev = model.lm_head.weight.device
+                    full_logits = hidden.to(lm_dev) @ model.lm_head.weight.T
+                    gold_token = full_logits[0].argmax().item()
+
+                    shortlist = hybrid_shortlist_fn(hidden[0], k, seq_ids, captured_attn)
+
+                    pruned_weight = model.lm_head.weight[shortlist.to(lm_dev)]
+                    t_lm0 = time.perf_counter()
+                    pruned_logits = hidden.to(lm_dev) @ pruned_weight.T
+                    _sync(lm_dev)
+                    t_lm1 = time.perf_counter()
+
+                    pruned_best = shortlist[pruned_logits[0].argmax().item()].item()
+                    accepted += int(pruned_best == gold_token)
+                    total_steps += 1
+
+                    input_ids = torch.tensor([[gold_token]], device=DEVICE)
+                    seq_ids = torch.cat([seq_ids, torch.tensor([gold_token])])
+
+                    _sync(DEVICE)
+                    total_times.append(time.perf_counter() - t_start)
+                    lmhead_times.append(t_lm1 - t_lm0)
+    finally:
+        remove_last_layer_hook(hook_handle)
+
+    arr_total = np.array(total_times)
+    arr_lm = np.array(lmhead_times)
+    return {
+        "k": k,
+        "acceptance_rate": accepted / total_steps,
+        "tokens_per_sec": 1.0 / arr_total.mean(),
+        "lmhead_frac": arr_lm.mean() / arr_total.mean(),
+        "mean_total_ms": arr_total.mean() * 1000,
+        "mean_lmhead_ms": arr_lm.mean() * 1000,
+    }
+
+
+def compute_perplexity_hybrid(
+    model,
+    tokenizer,
+    raw_dataset,
+    hybrid_shortlist_fn: Callable,   # (hidden, k, seq_ids, captured_attn) -> [k] CPU
+    k: int,
+    max_tokens: int = CFG.ppl_max_tokens,
+) -> float:
+    """
+    Perplexity under the Hybrid Attention+Graph router.
+
+    Mirrors compute_perplexity_attention but uses captured_attn dict populated
+    by the forward hook rather than the full out.attentions tuple.
+    """
+    from src.routers import register_last_layer_hook, remove_last_layer_hook
+
+    captured_attn, hook_handle = register_last_layer_hook(model)
+
+    lines = [l for l in raw_dataset["test"]["text"] if len(l.strip()) > 20]
+    tokens = torch.cat([tokenizer.encode(l, return_tensors="pt")[0] for l in lines])[:max_tokens]
+    input_ids = tokens.unsqueeze(0).to(DEVICE)
+    stride, seq_len, nlls = 512, input_ids.size(1), []
+
+    try:
+        with torch.no_grad():
+            for begin in tqdm(range(0, seq_len - 1, stride), desc=f"PPL Hybrid K={k}", leave=False):
+                end = min(begin + stride, seq_len - 1)
+                chunk = input_ids[:, begin : end + 1]
+                # output_attentions=True populates captured_attn via the hook
+                out = model(input_ids=chunk, output_hidden_states=True, output_attentions=True)
+                hiddens = out.hidden_states[-1][:, :-1, :]   # [1, T, d]
+                targets = chunk[:, 1:]
+                chunk_ids = chunk[0].cpu()
+
+                for t in range(hiddens.size(1)):
+                    h = hiddens[0, t].float().cpu()
+                    # For PPL we slice the captured attn to only the causal prefix
+                    # at position t.  captured_attn['attn'] is [H, T_q, T_k] for
+                    # the full chunk; we expose only the t-th query row.
+                    if captured_attn["attn"] is not None:
+                        full_attn = captured_attn["attn"]       # [H, T_chunk, T_chunk]
+                        # Slice: query position t, keys 0..t  → [H, 1, t+1]
+                        sliced = full_attn[:, t : t + 1, : t + 1]
+                        step_captured = {"attn": sliced}
+                    else:
+                        step_captured = {"attn": None}
+
+                    shortlist = hybrid_shortlist_fn(h, k, chunk_ids[: t + 1], step_captured)
+                    pruned_w = model.lm_head.weight[shortlist].float().cpu()
+                    logits = h @ pruned_w.T
+                    target = targets[0, t].item()
+                    if target in shortlist.tolist():
+                        local_idx = (shortlist == target).nonzero(as_tuple=True)[0][0].item()
+                        nll = -F.log_softmax(logits, dim=-1)[local_idx].item()
+                    else:
+                        nll = -math.log(1e-9)
+                    nlls.append(nll)
+    finally:
+        remove_last_layer_hook(hook_handle)
+
+    return math.exp(np.mean(nlls))
