@@ -49,24 +49,47 @@ from src.dual_encoder import (
 )
 from src.model_utils import DEVICE, load_model
 
-# ── Runtime config: respect env-var overrides set by FAST_MODE / notebook ─────
-_FAST_MODE = os.environ.get("FAST_MODE", "0") not in ("0", "", "false", "False")
+# ── Runtime config helpers ─────────────────────────────────────────────────────
+# NOTE: deliberately NOT evaluated at module import time so that notebook cells
+# can change FAST_MODE / env vars and then call run_sweep() without needing to
+# reload the module.
 
-# Index / training sizes
-_N_INDEX_COMPLETIONS = int(
-    os.environ.get("N_INDEX_COMPLETIONS", 2_000 if _FAST_MODE else CFG.n_index_completions)
-)
-_N_TRAIN_PAIRS = int(
-    os.environ.get("N_TRAIN_PAIRS", 1_000 if _FAST_MODE else CFG.n_train_pairs)
-)
+def _resolve_runtime_config(
+    fast_mode=None,
+    n_index_completions=None,
+    n_train_pairs=None,
+    k_sweep=None,
+):
+    """
+    Resolve sweep hyper-parameters from explicit args > env vars > defaults.
 
-# K values to sweep
-_k_env = os.environ.get("K_VALUES", "")
-K_SWEEP = (
-    [int(k) for k in _k_env.split(",") if k.strip()]
-    if _k_env
-    else [5_000, 10_000]
-)
+    Called at the top of run_sweep() so values are read at *call time*, not at
+    module import time.  Explicit keyword arguments always win.
+    """
+    # fast_mode
+    if fast_mode is None:
+        fast_mode = os.environ.get("FAST_MODE", "0") not in ("0", "", "false", "False")
+
+    # index size
+    if n_index_completions is None:
+        _env = os.environ.get("N_INDEX_COMPLETIONS", "")
+        n_index_completions = int(_env) if _env else (2_000 if fast_mode else CFG.n_index_completions)
+
+    # train pairs
+    if n_train_pairs is None:
+        _env = os.environ.get("N_TRAIN_PAIRS", "")
+        n_train_pairs = int(_env) if _env else (1_000 if fast_mode else CFG.n_train_pairs)
+
+    # K sweep
+    if k_sweep is None:
+        _k_env = os.environ.get("K_VALUES", "")
+        k_sweep = (
+            [int(k) for k in _k_env.split(",") if k.strip()]
+            if _k_env
+            else [5_000, 10_000]
+        )
+
+    return fast_mode, n_index_completions, n_train_pairs, k_sweep
 
 # ── Output paths ──────────────────────────────────────────────────────────────
 RESULTS_DIR = CFG.results_dir
@@ -186,14 +209,37 @@ def _build_raw_dataset_for_dual_encoder(normalised: dict, tokenizer):
 
 # ── Main sweep ────────────────────────────────────────────────────────────────
 
-def run_sweep(dataset_keys=None):
+def run_sweep(
+    dataset_keys=None,
+    *,
+    fast_mode=None,
+    n_index_completions=None,
+    n_train_pairs=None,
+    k_sweep=None,
+):
     """
     Run the full multi-dataset robustness sweep.
 
     Args:
-        dataset_keys: list of dataset keys to run (default: all registered datasets).
-                      Can be overridden by DATASET_NAME env var for single-dataset runs.
+        dataset_keys:        list of dataset keys to run (default: all registered datasets).
+                             Can be overridden by DATASET_NAME env var for single-dataset runs.
+        fast_mode:           True → use reduced index/training sizes (overrides env var).
+        n_index_completions: completion index size (overrides env var + fast_mode default).
+        n_train_pairs:       number of router training pairs (overrides env var + fast_mode default).
+        k_sweep:             list of K values to sweep (overrides env var default).
+
+    Config resolution order: explicit kwarg > env var > fast_mode default > CFG default.
+    Values are resolved here at *call time* so that notebook cells can change FAST_MODE
+    without needing to reload the module.
     """
+    # Resolve runtime config at call time (not at import time)
+    _fast_mode, _n_index_completions, _n_train_pairs, _k_sweep = _resolve_runtime_config(
+        fast_mode=fast_mode,
+        n_index_completions=n_index_completions,
+        n_train_pairs=n_train_pairs,
+        k_sweep=k_sweep,
+    )
+
     # Honour DATASET_NAME env var for targeted single-dataset runs
     env_key = os.environ.get("DATASET_NAME", "")
     if env_key and env_key in DATASET_REGISTRY:
@@ -206,10 +252,10 @@ def run_sweep(dataset_keys=None):
     print(f"Multi-dataset robustness sweep")
     print(f"Model:         {CFG.model_name}")
     print(f"Datasets:      {dataset_keys}")
-    print(f"K values:      {K_SWEEP}")
-    print(f"Fast mode:     {_FAST_MODE}")
-    print(f"Index size:    {_N_INDEX_COMPLETIONS:,}")
-    print(f"Train pairs:   {_N_TRAIN_PAIRS:,}")
+    print(f"K values:      {_k_sweep}")
+    print(f"Fast mode:     {_fast_mode}")
+    print(f"Index size:    {_n_index_completions:,}")
+    print(f"Train pairs:   {_n_train_pairs:,}")
     print(f"{'='*60}\n")
 
     # Load model once — shared across all datasets
@@ -250,7 +296,7 @@ def run_sweep(dataset_keys=None):
         raw_shim = _DatasetShim(normalised["train"])
         # Temporarily patch CFG so build_completion_index uses our size override
         _orig_n_index = CFG.n_index_completions
-        CFG.n_index_completions = _N_INDEX_COMPLETIONS
+        CFG.n_index_completions = _n_index_completions
         completion_token_lists, completion_index, _ = build_completion_index(
             model, tokenizer, raw_shim
         )
@@ -258,7 +304,7 @@ def run_sweep(dataset_keys=None):
 
         # ── 4. Train a fresh router on this dataset ───────────────────────────
         _orig_n_pairs = CFG.n_train_pairs
-        CFG.n_train_pairs = _N_TRAIN_PAIRS
+        CFG.n_train_pairs = _n_train_pairs
         router, key_projector = train_router(model, train_tokens)
         CFG.n_train_pairs = _orig_n_pairs
         router.eval()
@@ -271,7 +317,7 @@ def run_sweep(dataset_keys=None):
         baseline_ppl = _full_vocab_ppl(model, tokenizer, normalised["test"])
 
         # ── 6. Sweep K values ─────────────────────────────────────────────────
-        for k in K_SWEEP:
+        for k in _k_sweep:
             print(f"\n  K={k:,}")
             pruned_ppl, acceptance = _pruned_ppl_and_acceptance(
                 model,
@@ -297,9 +343,9 @@ def run_sweep(dataset_keys=None):
                 "pruned_ppl": round(pruned_ppl, 4),
                 "delta_ppl": round(delta_ppl, 4),
                 "acceptance_rate": round(acceptance, 6),
-                "n_index_completions": _N_INDEX_COMPLETIONS,
-                "n_train_pairs": _N_TRAIN_PAIRS,
-                "fast_mode": _FAST_MODE,
+                "n_index_completions": _n_index_completions,
+                "n_train_pairs": _n_train_pairs,
+                "fast_mode": _fast_mode,
             })
 
         # Checkpoint: write after each dataset so partial results are preserved
