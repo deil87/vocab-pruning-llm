@@ -11,8 +11,14 @@ class Config:
     # Override by setting MODEL_NAME env var before running scripts, e.g.:
     #   MODEL_NAME=meta-llama/Llama-3.1-8B-Instruct python run_baseline.py
     model_name: str = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-1B-Instruct")
+    # Legacy fields used by the original single-dataset scripts (WikiText-2).
+    # For multi-dataset experiments use src/dataset_utils.DATASET_REGISTRY instead.
     dataset_name: str = "wikitext"
     dataset_config: str = "wikitext-2-raw-v1"
+    # Override by setting DATASET_NAME env var, e.g.:
+    #   DATASET_NAME=ptb python run_multi_dataset.py
+    # Valid values: wikitext2 | ptb | ag_news | codeparrot
+    multi_dataset_key: str = os.environ.get("DATASET_NAME", "wikitext2")
     seed: int = 42
 
     # ── Benchmark ─────────────────────────────────────────────────────────────

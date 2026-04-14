@@ -197,3 +197,138 @@ def plot_speculative_sweep(df_spec: pd.DataFrame, baseline_tps: float):
 
     plt.tight_layout()
     _save(fig, "speculative_decoding_sweep.png")
+
+
+# ── Multi-dataset robustness plots ────────────────────────────────────────────
+
+def plot_multi_dataset_delta_ppl(df: "pd.DataFrame"):
+    """
+    Grouped bar chart: ΔPPL per dataset × K value.
+
+    df must have columns: dataset_label, k, delta_ppl
+    """
+    import pandas as pd
+
+    datasets = df["dataset_label"].unique().tolist()
+    k_values = sorted(df["k"].unique().tolist())
+    x = np.arange(len(datasets))
+    width = 0.35
+    offsets = np.linspace(-(len(k_values) - 1) / 2, (len(k_values) - 1) / 2, len(k_values))
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    colors = sns.color_palette("muted", len(k_values))
+
+    for i, k in enumerate(k_values):
+        sub = df[df["k"] == k].set_index("dataset_label")
+        vals = [sub.loc[d, "delta_ppl"] if d in sub.index else float("nan") for d in datasets]
+        bars = ax.bar(x + offsets[i] * width, vals, width * 0.9,
+                      label=f"K={k:,}", color=colors[i])
+        for bar, v in zip(bars, vals):
+            if not np.isnan(v):
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + 0.01,
+                    f"{v:+.2f}",
+                    ha="center", va="bottom", fontsize=7,
+                )
+
+    ax.axhline(0.0, color="black", linestyle="--", linewidth=1, label="Baseline (ΔPPL=0)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(datasets, fontsize=9)
+    ax.set_ylabel("ΔPPL (pruned − baseline)")
+    ax.set_title("Vocabulary Pruning: PPL Degradation Across Domains")
+    ax.legend(fontsize=9)
+    plt.tight_layout()
+    _save(fig, "multi_dataset_delta_ppl.png")
+
+
+def plot_multi_dataset_acceptance(df: "pd.DataFrame"):
+    """
+    Grouped bar chart: token acceptance rate per dataset × K value.
+
+    df must have columns: dataset_label, k, acceptance_rate
+    """
+    datasets = df["dataset_label"].unique().tolist()
+    k_values = sorted(df["k"].unique().tolist())
+    x = np.arange(len(datasets))
+    width = 0.35
+    offsets = np.linspace(-(len(k_values) - 1) / 2, (len(k_values) - 1) / 2, len(k_values))
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    colors = sns.color_palette("muted", len(k_values))
+
+    for i, k in enumerate(k_values):
+        sub = df[df["k"] == k].set_index("dataset_label")
+        vals = [
+            sub.loc[d, "acceptance_rate"] * 100 if d in sub.index else float("nan")
+            for d in datasets
+        ]
+        bars = ax.bar(x + offsets[i] * width, vals, width * 0.9,
+                      label=f"K={k:,}", color=colors[i])
+        for bar, v in zip(bars, vals):
+            if not np.isnan(v):
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + 0.3,
+                    f"{v:.1f}%",
+                    ha="center", va="bottom", fontsize=7,
+                )
+
+    ax.axhline(100.0, color="black", linestyle="--", linewidth=1, label="100% (perfect)")
+    ax.set_ylim(0, 105)
+    ax.set_xticks(x)
+    ax.set_xticklabels(datasets, fontsize=9)
+    ax.set_ylabel("Token acceptance rate (%)")
+    ax.set_title("Vocabulary Pruning: Token Acceptance Rate Across Domains")
+    ax.legend(fontsize=9)
+    plt.tight_layout()
+    _save(fig, "multi_dataset_acceptance.png")
+
+
+def plot_multi_dataset_heatmap(df: "pd.DataFrame"):
+    """
+    Heatmap: datasets (rows) × K values (cols), cell = ΔPPL.
+    """
+    pivot = df.pivot(index="dataset_label", columns="k", values="delta_ppl")
+    pivot.columns = [f"K={c:,}" for c in pivot.columns]
+
+    fig, ax = plt.subplots(figsize=(6, max(3, len(pivot) * 0.8)))
+    sns.heatmap(
+        pivot,
+        annot=True,
+        fmt=".2f",
+        cmap="RdYlGn_r",
+        center=0.0,
+        linewidths=0.5,
+        ax=ax,
+        cbar_kws={"label": "ΔPPL"},
+    )
+    ax.set_title("ΔPPL Heatmap: Dataset × Shortlist Size K")
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    plt.tight_layout()
+    _save(fig, "multi_dataset_heatmap.png")
+
+
+def plot_all_multi_dataset(csv_path: "str | Path" = None):
+    """
+    Load multi_dataset_results.csv and generate all three cross-dataset plots.
+    Can be called standalone: python -c "from src.plots import plot_all_multi_dataset; plot_all_multi_dataset()"
+    """
+    import pandas as pd
+    from pathlib import Path
+
+    if csv_path is None:
+        csv_path = CFG.results_dir / "multi_dataset_results.csv"
+    csv_path = Path(csv_path)
+
+    if not csv_path.exists():
+        print(f"No results found at {csv_path}. Run run_multi_dataset.py first.")
+        return
+
+    df = pd.read_csv(csv_path)
+    print(f"Loaded {len(df)} rows from {csv_path}")
+    plot_multi_dataset_delta_ppl(df)
+    plot_multi_dataset_acceptance(df)
+    plot_multi_dataset_heatmap(df)
+    print("All multi-dataset plots saved.")
