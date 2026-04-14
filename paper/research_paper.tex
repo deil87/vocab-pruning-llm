@@ -80,7 +80,7 @@
 }
 \author{%
   \normalsize
-  1B + 8B GPU benchmarks complete --- April 2026%
+  1B + 8B GPU benchmarks on NVIDIA RTX PRO 4500 Blackwell --- April 2026%
 }
 \date{}
 
@@ -110,11 +110,11 @@ candidates by nearest-neighbour search over a pre-indexed corpus of sentence
 completions. We benchmark four routing strategies against a full-vocabulary
 baseline on WikiText-2 (\code{Llama-3.2-1B-Instruct}), sweeping shortlist
 sizes $K \in \{512, 1\text{k}, 2\text{k}, 5\text{k}, 10\text{k}\}$. We
-additionally evaluate on \code{Llama-3.1-8B-Instruct} across two T4 GPUs
-(\code{device\_map="auto"}). On a single T4, the \code{lm\_head} accounts for
-6.1\% of per-token latency for the 1B model; on the sharded 8B model this
-fraction drops counter-intuitively to 4.69\%, explained by cross-GPU
-communication overhead inflating total step time. The primary demonstrated
+additionally evaluate on \code{Llama-3.1-8B-Instruct} on the same single GPU.
+Both models run on a single NVIDIA RTX PRO 4500 Blackwell (32\,GB VRAM). The
+\code{lm\_head} accounts for 5.17\% of per-token latency on the 1B model and
+4.98\% on the 8B model --- essentially equal fractions, consistent with
+memory-bandwidth-bound behaviour on a single GPU. The primary demonstrated
 gain is a 92--99.6\% reduction in \code{lm\_head} memory bandwidth.
 Wall-clock speedup requires GPU-native kernels or larger models (70B+) where
 the memory-bound regime is more pronounced.
@@ -161,7 +161,8 @@ vocabulary region is relevant before the full projection is run?}
 
 \begin{enumerate}[leftmargin=*, itemsep=0pt, topsep=2pt]
   \item \textbf{Profiling.} We quantify the \code{lm\_head} fraction of
-        per-token latency for a 1B open-source LLM on an NVIDIA T4 GPU.
+        per-token latency for 1B and 8B open-source LLMs on an NVIDIA RTX PRO
+        4500 Blackwell GPU.
   \item \textbf{Router taxonomy.} We define and implement four vocabulary
         routing strategies of increasing sophistication.
   \item \textbf{Dual-Encoder Router.} A lightweight MLP trained with MNRL
@@ -171,8 +172,14 @@ vocabulary region is relevant before the full projection is run?}
         token acceptance rate, perplexity, and tokens/sec across
         $K \in \{512,1\text{k},2\text{k},5\text{k},10\text{k}\}$.
   \item \textbf{Scale evaluation.} The full router suite re-evaluated on
-        \code{Llama-3.1-8B-Instruct} on two T4 GPUs (\code{device\_map="auto"}),
-        quantifying how overhead and quality scale with model size.
+        \code{Llama-3.1-8B-Instruct} on the same single GPU, quantifying how
+        overhead and quality scale with model size.
+  \item \textbf{GPU-native kernel.} A Triton-based fused kernel implementing
+        the Dual-Encoder router on-device. Combined with a hardware upgrade
+        from T4 to Blackwell, DE step time fell from $\sim$78\,ms to
+        $\sim$15\,ms and per-step router overhead dropped from $\sim$34\,ms to
+        $\sim$2.6\,ms ($13\times$); isolating the kernel's individual
+        contribution from the hardware change remains future work.
 \end{enumerate}
 
 % ────────────────────────────────────────────────────────────
@@ -308,8 +315,7 @@ with highest $\cos(q_t, W_V[v,:])$ via brute-force matmul.
 
 \textbf{8B model:} \code{meta-llama/Llama-3.1-8B-Instruct} --- 8B parameters,
 4096-dim hidden state, 128,256-token vocabulary, 32 transformer layers,
-\code{bfloat16}. Loaded with \code{device\_map="auto"} across two GPUs
-(layers 0--17 on \code{cuda:0}, 18--31 on \code{cuda:1}).
+\code{bfloat16}. Loaded on a single GPU (\code{device\_map="cuda:0"}).
 
 \subsection{Dataset}
 \textbf{WikiText-2-raw-v1}~\cite{merity2016}: standard language modelling
@@ -319,12 +325,9 @@ benchmark; plain English prose. Router training: \code{train} split
 passages of 128 tokens from the \code{validation} split.
 
 \subsection{Hardware}
-\textbf{1B experiments:} NVIDIA T4 GPU (16\,GB VRAM), single GPU, CUDA
-backend, \code{bfloat16}.
-
-\textbf{8B experiments:} Two NVIDIA T4 GPUs (2$\times$16\,GB VRAM),
-\code{device\_map="auto"} sharding via HuggingFace Accelerate, CUDA backend,
-\code{bfloat16}.
+\textbf{Both experiments:} Single NVIDIA RTX PRO 4500 Blackwell GPU (32\,GB
+VRAM, SM~12.0), CUDA backend, \code{bfloat16}. The 8B model (14\,GB in
+\code{bfloat16}) fits comfortably on a single device with no sharding.
 
 All latency measurements taken after a 5-step warm-up; reported as mean over
 50 prompts.
@@ -347,48 +350,55 @@ All latency measurements taken after a 5-step warm-up; reported as mean over
 \section{Results}
 % ────────────────────────────────────────────────────────────
 
-All 1B experiments: NVIDIA T4 GPU (single), CUDA, \code{bfloat16},
-\code{Llama-3.2-1B-Instruct}. All 8B experiments: two NVIDIA T4 GPUs,
-\code{device\_map="auto"}, \code{Llama-3.1-8B-Instruct}. Latency: means
-over 50 WikiText-2 validation prompts after 5-step warm-up. Perplexity: full
-WikiText-2 test split.
+All experiments run on a single NVIDIA RTX PRO 4500 Blackwell GPU (32\,GB,
+SM~12.0), CUDA, \code{bfloat16}. 1B model: \code{Llama-3.2-1B-Instruct}.
+8B model: \code{Llama-3.1-8B-Instruct}. Latency: means over 50 WikiText-2
+validation prompts after 5-step warm-up. Perplexity: full WikiText-2 test split.
 
 \subsection{Baseline Profiling}
 
 \begin{table}[h]
 \centering
-\caption{Full-vocabulary baseline measurements for both models.}
+\caption{Full-vocabulary baseline measurements for both models (single NVIDIA
+  RTX PRO 4500 Blackwell GPU).}
 \label{tab:baseline}
 \small
 \begin{tabular}{@{}lrr@{}}
 \toprule
-\tblhead{Metric} & \tblhead{1B (T4)} & \tblhead{8B (T4$\times$2)} \\
+\tblhead{Metric} & \tblhead{1B} & \tblhead{8B} \\
 \midrule
-Tokens/sec (full vocab)        & \textbf{26.60}  & \textbf{11.48} \\
-Mean step time                 & 37.60\,ms       & 87.14\,ms \\
-\code{lm\_head} time (mean)    & 2.30\,ms        & 4.08\,ms \\
-\code{lm\_head} time \%        & \textbf{6.1\%}  & \textbf{4.69\%} \\
-Baseline PPL (WikiText-2 test) & \textbf{26.24}  & \textbf{16.63} \\
+Tokens/sec (full vocab)        & \textbf{77.75}  & \textbf{37.93} \\
+Mean step time                 & 12.86\,ms       & 26.37\,ms \\
+\code{lm\_head} time (mean)    & 0.665\,ms       & 1.313\,ms \\
+\code{lm\_head} time \%        & \textbf{5.17\%} & \textbf{4.98\%} \\
+Baseline PPL (WikiText-2 test) & \textbf{26.256} & \textbf{16.623} \\
 \code{lm\_head} weight matrix  & 525\,MB         & 1,049\,MB \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The \code{lm\_head} accounts for only 6.1\% of per-token latency on the 1B
-model and 4.69\% on the 8B model. Counter-intuitively, the fraction
-\emph{decreases} with model size: on the T4$\times$2 setup,
-\code{device\_map="auto"} shards the 8B model across two GPUs, introducing
-cross-GPU communication overhead that inflates total step time while
-\code{lm\_head} time grows more modestly. This is a critical constraint: any
-router whose overhead exceeds these absolute values will make pruning
-net-negative (Section~\ref{sec:lmhead-fraction}).
+The \code{lm\_head} accounts for 5.17\% of per-token latency on the 1B model
+and 4.98\% on the 8B model. These fractions are essentially equal, consistent
+with memory-bandwidth-bound behaviour on a single GPU: both models stream their
+respective \code{lm\_head} matrices from VRAM at the same throughput-limited
+rate, so the fraction scales with matrix size relative to total step time. This
+is a critical constraint: any router whose overhead exceeds these absolute
+values will make pruning net-negative (Section~\ref{sec:lmhead-fraction}).
 
-\begin{figure}[H]
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\columnwidth]{../results/baseline_profile.png}
-\caption{Baseline decode step profiling: per-operation time breakdown.}
+\begin{subfigure}[b]{0.48\textwidth}
+  \includegraphics[width=\textwidth]{../results/results_1b_gpu_kernel/baseline_profile.png}
+  \caption{1B model (Llama-3.2-1B-Instruct).}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+  \includegraphics[width=\textwidth]{../results/results_8b_gpu_kernel/baseline_profile.png}
+  \caption{8B model (Llama-3.1-8B-Instruct).}
+\end{subfigure}
+\caption{Baseline decode step profiling: per-operation time breakdown (single NVIDIA RTX PRO 4500 Blackwell GPU).}
 \label{fig:baseline}
-\end{figure}
+\end{figure*}
 
 \subsection{Token Acceptance Rate vs.\ K}
 
@@ -397,38 +407,36 @@ token falls within the pruned shortlist (Table~\ref{tab:acceptance}).
 
 \begin{table*}[t]
 \centering
-\caption{Token acceptance rate (\%) vs.\ shortlist size $K$ --- 1B model (T4, single GPU).}
+\caption{Token acceptance rate (\%) vs.\ shortlist size $K$ --- 1B model (Blackwell, single GPU).}
 \label{tab:acceptance}
 \small
 \begin{tabular}{@{}lrrrrr@{}}
 \toprule
 \tblhead{Router} & \tblhead{K=512} & \tblhead{K=1k} & \tblhead{K=2k} & \tblhead{K=5k} & \tblhead{K=10k} \\
 \midrule
-Static Top-K         & 0.09 & 0.25 & 0.50 & 2.5  & 7.7  \\
-Cluster              & 33.8 & 54.8 & 68.1 & 76.6 & 83.3 \\
-Cosine               & 98.4 & 98.4 & 98.4 & 98.4 & 98.4 \\
-Dual-Encoder (step)  & 99.5 & 99.5 & 99.5 & 99.5 & 99.5 \\
+Static Top-K         & 0.16 & 0.25 & 0.53 & 2.75 & 7.66 \\
+Cluster              & 33.7 & 54.7 & 67.8 & 76.0 & 83.3 \\
+Cosine               & 98.6 & 98.6 & 98.6 & 98.6 & 98.6 \\
+Dual-Encoder (step)  & 99.4 & 99.4 & 99.4 & 99.4 & 99.4 \\
 MLP Graph            & 99.9 & 100.0 & 100.0 & 100.0 & 100.0 \\
-Attention Graph      & 82.7 & 99.8 & 99.8 & 99.8 & 99.8 \\
 \bottomrule
 \end{tabular}
 \end{table*}
 
 \begin{table*}[t]
 \centering
-\caption{Token acceptance rate (\%) vs.\ shortlist size $K$ --- 8B model (T4$\times$2).
-         Attention Graph omitted (prohibitive overhead on T4$\times$2).}
+\caption{Token acceptance rate (\%) vs.\ shortlist size $K$ --- 8B model (Blackwell, single GPU).}
 \label{tab:acceptance-8b}
 \small
 \begin{tabular}{@{}lrrrrr@{}}
 \toprule
 \tblhead{Router} & \tblhead{K=512} & \tblhead{K=1k} & \tblhead{K=2k} & \tblhead{K=5k} & \tblhead{K=10k} \\
 \midrule
-Static Top-K          & 3.9  & 4.0  & 4.4  & 5.8  & 8.4  \\
-Cluster               & 44.1 & 60.2 & 66.1 & 76.4 & 85.2 \\
-Cosine                & 98.2 & 98.2 & 98.2 & 98.2 & 98.2 \\
-Dual-Encoder (step)   & 99.8 & 99.8 & 99.8 & 99.8 & 99.8 \\
-DE (prefetch+refresh) & ---  & ---  & ---  & 87.9 & ---  \\
+Static Top-K          & 3.84 & 3.97 & 4.44 & 5.97 & 8.41 \\
+Cluster               & 42.8 & 56.6 & 65.8 & 76.8 & 85.3 \\
+Cosine                & 98.0 & 98.0 & 98.0 & 98.0 & 98.0 \\
+Dual-Encoder (step)   & 99.5 & 99.5 & 99.5 & 99.5 & 99.5 \\
+DE (prefetch+refresh) & ---  & ---  & ---  & 87.1 & ---  \\
 MLP Graph             & 99.8 & 99.8 & 99.8 & 99.8 & 99.8 \\
 \bottomrule
 \end{tabular}
@@ -436,22 +444,30 @@ MLP Graph             & 99.8 & 99.8 & 99.8 & 99.8 & 99.8 \\
 
 Key observations (1B): Static Top-K is near-random ($<$8\% at K=10k). Cluster
 saturates at 83\% --- 17\% of correct tokens live in unselected clusters.
-Cosine acceptance is flat at 98.4\% across all $K$ values, indicating the
+Cosine acceptance is flat at 98.6\% across all $K$ values, indicating the
 router reaches its information-theoretic ceiling early. Dual-Encoder (step)
-and MLP Graph achieve the highest acceptance (99.5\% and $\geq$99.9\%
+and MLP Graph achieve the highest acceptance (99.4\% and $\geq$99.9\%
 respectively), essentially independent of $K$ above 512.
 
-On the 8B model (Table~\ref{tab:acceptance-8b}), DE (step) and MLP Graph
-transfer perfectly, both achieving \textbf{99.8\%} acceptance at all $K$.
-Cluster improves to 85.2\% at K=10k (vs.\ 83.3\% on 1B). Static Top-K
-remains near-random. Cosine achieves 98.2\% acceptance on 8B --- flat
-across all $K$, identical ceiling behaviour to the 1B model (98.4\%),
-confirming the router hits its information-theoretic ceiling regardless of
-model size.
+On the 8B model (Table~\ref{tab:acceptance-8b}), DE (step) achieves
+\textbf{99.5\%} acceptance at all $K$ and MLP Graph \textbf{99.8\%} ---
+both transferring near-perfectly from 1B. Cluster improves to 85.3\% at
+K=10k (vs.\ 83.3\% on 1B). Static Top-K remains near-random. Cosine achieves
+98.0\% acceptance on 8B --- flat across all $K$, identical ceiling behaviour
+to the 1B model (98.6\%), confirming the router hits its information-theoretic
+ceiling regardless of model size.
 
 \begin{figure*}[t]
 \centering
-\includegraphics[width=\textwidth]{../results/acceptance_rate_vs_k.png}
+\begin{subfigure}[b]{0.48\textwidth}
+  \includegraphics[width=\textwidth]{../results/results_1b_gpu_kernel/acceptance_rate_vs_k.png}
+  \caption{1B model.}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+  \includegraphics[width=\textwidth]{../results/results_8b_gpu_kernel/acceptance_rate_vs_k.png}
+  \caption{8B model.}
+\end{subfigure}
 \caption{Token acceptance rate vs.\ shortlist size $K$ for all routers.}
 \label{fig:acceptance}
 \end{figure*}
@@ -459,12 +475,12 @@ model size.
 \subsection{Perplexity Degradation vs.\ K}
 
 $\Delta\text{PPL} = \text{PPL}_{\text{pruned}} - \text{PPL}_{\text{baseline}}$;
-baseline PPL = 26.24 for 1B, 16.63 for 8B (Table~\ref{tab:ppl} and
+baseline PPL = 26.256 for 1B, 16.623 for 8B (Table~\ref{tab:ppl} and
 Table~\ref{tab:ppl-8b}).
 
 \begin{table*}[t]
 \centering
-\caption{Perplexity degradation ($\Delta$PPL) vs.\ shortlist size $K$ --- 1B model (baseline PPL = 26.24).
+\caption{Perplexity degradation ($\Delta$PPL) vs.\ shortlist size $K$ --- 1B model (baseline PPL = 26.256).
          Static Top-K and Cluster omitted due to extreme values
          ($\Delta$PPL $> 10^6$).}
 \label{tab:ppl}
@@ -473,20 +489,19 @@ Table~\ref{tab:ppl-8b}).
 \toprule
 \tblhead{Router} & \tblhead{K=512} & \tblhead{K=1k} & \tblhead{K=2k} & \tblhead{K=5k} & \tblhead{K=10k} \\
 \midrule
-Cosine                          & +19.00 & +10.83 & +6.79 & +3.54 & \textbf{+2.73} \\
-Dual-Encoder (step)             & +24.64 & +8.95  & +3.93 & +1.68 & \textbf{+1.03} \\
-Dual-Encoder (prefetch+refresh)\textsuperscript{$\dagger$} & --- & --- & --- & +146.15 & --- \\
-MLP Graph                       & +39.59 & +13.22 & +6.39 & +2.89 & \textbf{+2.11} \\
-Attention Graph                 & +15025 & +21.58 & +5.91 & +2.10 & \textbf{+1.33} \\
+Cosine                          & +18.72 & +10.62 & +6.77 & +3.52 & \textbf{+2.71} \\
+Dual-Encoder (step)             & +23.30 & +8.89  & +4.12 & +1.70 & \textbf{+1.11} \\
+Dual-Encoder (prefetch+refresh)\textsuperscript{$\dagger$} & --- & --- & --- & +151.40 & --- \\
+MLP Graph                       & +40.39 & +13.29 & +6.37 & +2.88 & \textbf{+2.09} \\
 \bottomrule
 \multicolumn{6}{l}{\footnotesize $\dagger$ Prefetch+refresh uses a fixed
-  effective $K{\approx}4{,}634$ averaged over the evaluation.}
+  effective $K{\approx}4{,}729$ averaged over the evaluation.}
 \end{tabular}
 \end{table*}
 
 \begin{table*}[t]
 \centering
-\caption{Perplexity degradation ($\Delta$PPL) vs.\ shortlist size $K$ --- 8B model (baseline PPL = 16.63).
+\caption{Perplexity degradation ($\Delta$PPL) vs.\ shortlist size $K$ --- 8B model (baseline PPL = 16.623).
          Static Top-K and Cluster omitted (extreme values: $\Delta$PPL $\gg 10^3$).}
 \label{tab:ppl-8b}
 \small
@@ -494,30 +509,39 @@ Attention Graph                 & +15025 & +21.58 & +5.91 & +2.10 & \textbf{+1.3
 \toprule
 \tblhead{Router} & \tblhead{K=512} & \tblhead{K=1k} & \tblhead{K=2k} & \tblhead{K=5k} & \tblhead{K=10k} \\
 \midrule
-Cosine                          & +5.05 & +3.21 & +2.43 & +1.40 & \textbf{+1.01} \\
-Dual-Encoder (step)             & +6.63 & +2.09 & +1.15 & +0.55 & \textbf{+0.29} \\
-Dual-Encoder (prefetch+refresh)\textsuperscript{$\dagger$} & --- & --- & --- & +122.85 & --- \\
-MLP Graph                       & +10.82 & +3.57 & +2.10 & +1.20 & \textbf{+0.82} \\
+Cosine                          & +5.06 & +3.21 & +2.37 & +1.40 & \textbf{+1.01} \\
+Dual-Encoder (step)             & +6.65 & +1.98 & +1.04 & +0.44 & \textbf{+0.19} \\
+Dual-Encoder (prefetch+refresh)\textsuperscript{$\dagger$} & --- & --- & --- & +149.24 & --- \\
+MLP Graph                       & +10.86 & +3.60 & +2.17 & +1.22 & \textbf{+0.84} \\
 \bottomrule
-\multicolumn{6}{l}{\footnotesize $\dagger$ Effective $K{\approx}4{,}112$ (8B).}
+\multicolumn{6}{l}{\footnotesize $\dagger$ Effective $K{\approx}4{,}080$ (8B).}
 \end{tabular}
 \end{table*}
 
-At K=10k the three best 1B methods cluster closely: DE step (+1.03), Attention
-Graph (+1.33), MLP Graph (+2.11), and Cosine (+2.73) --- all within 11\% of
-baseline PPL. DE step at K=5k achieves $\Delta$PPL=+1.68 with a 96.1\%
-memory bandwidth reduction.
+At K=10k the three best 1B methods cluster closely: DE step (+1.11), MLP
+Graph (+2.09), and Cosine (+2.71) --- all within 11\% of baseline PPL. DE
+step at K=5k achieves $\Delta$PPL=+1.70 with a 96.1\% memory bandwidth
+reduction.
 
-On the 8B model, quality improves significantly at the same $K$: Cosine at
-K=10k achieves $\Delta$PPL=\textbf{+1.01} (vs.\ +2.73 on 1B), DE (step)
-at K=10k reaches $\Delta$PPL=\textbf{+0.29} (vs.\ +1.03 on 1B), and MLP
-Graph reaches \textbf{+0.82} (vs.\ +2.11). This improvement likely reflects
-the higher-capacity 8B model producing a richer hidden state that the router
-can use more precisely.
+On the 8B model, quality improves markedly at the same $K$: Cosine at K=10k
+achieves $\Delta$PPL=\textbf{+1.01} (vs.\ +2.71 on 1B), DE (step) at K=10k
+reaches $\Delta$PPL=\textbf{+0.19} (vs.\ +1.11 on 1B) --- effectively
+near-lossless quality with a 92.2\% bandwidth reduction --- and MLP Graph
+reaches \textbf{+0.84} (vs.\ +2.09). This improvement reflects the
+higher-capacity 8B model producing a richer hidden state that the router can
+use more precisely.
 
 \begin{figure*}[t]
 \centering
-\includegraphics[width=\textwidth]{../results/ppl_degradation_vs_k.png}
+\begin{subfigure}[b]{0.48\textwidth}
+  \includegraphics[width=\textwidth]{../results/results_1b_gpu_kernel/ppl_degradation_vs_k.png}
+  \caption{1B model.}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+  \includegraphics[width=\textwidth]{../results/results_8b_gpu_kernel/ppl_degradation_vs_k.png}
+  \caption{8B model.}
+\end{subfigure}
 \caption{Perplexity degradation ($\Delta$PPL) vs.\ shortlist size $K$.
          Static Top-K and Cluster are omitted due to extreme values.}
 \label{fig:ppl}
@@ -525,27 +549,26 @@ can use more precisely.
 
 \subsection{Tokens/sec vs.\ K}
 
-Wall-clock throughput. 1B baseline = 26.60\,tok/s (Table~\ref{tab:throughput});
-8B baseline = 11.48\,tok/s (Table~\ref{tab:throughput-8b}).
+Wall-clock throughput. 1B baseline = 77.75\,tok/s (Table~\ref{tab:throughput});
+8B baseline = 37.93\,tok/s (Table~\ref{tab:throughput-8b}).
 
 \begin{table*}[t]
 \centering
 \caption{Wall-clock throughput (tok/s) vs.\ shortlist size $K$ --- 1B model.
-         Baseline = 26.60\,tok/s (NVIDIA T4 GPU, single).}
+         Baseline = 77.75\,tok/s (NVIDIA RTX PRO 4500 Blackwell, single GPU).}
 \label{tab:throughput}
 \small
 \begin{tabular}{@{}lrrrrrr@{}}
 \toprule
 \tblhead{Router} & \tblhead{K=512} & \tblhead{K=1k} & \tblhead{K=2k} & \tblhead{K=5k} & \tblhead{K=10k} & \tblhead{vs.\ baseline} \\
 \midrule
-\textbf{Baseline} & --- & --- & --- & --- & 26.60 & --- \\
-Static Top-K      & 26.07 & 26.40 & 26.36 & 26.82 & 26.70 & $-1\%$ to $+1\%$ \\
-Cluster           & 24.34 & 24.18 & 24.25 & 24.27 & 23.99 & $-9\%$ to $-10\%$ \\
-Cosine            & 24.27 & 24.17 & 23.77 & 23.51 & 23.72 & $-9\%$ to $-12\%$ \\
-DE (prefetch+refresh) & --- & --- & --- & \textbf{27.67} & --- & $\mathbf{+4\%}$ \\
-Dual-Encoder (step)   & 23.27 & 22.97 & 23.20 & 23.16 & 22.39 & $-13\%$ to $-16\%$ \\
-MLP Graph         & 24.28 & 24.31 & 23.81 & 22.89 & 22.83 & $-14\%$ to $-16\%$ \\
-Attention Graph   & 22.72 & 20.71 & 21.30 & 20.12 & 19.98 & $-15\%$ to $-25\%$ \\
+\textbf{Baseline} & --- & --- & --- & --- & 77.75 & --- \\
+Static Top-K      & 75.49 & 76.90 & 77.27 & 77.31 & 76.62 & $-2\%$ to $+0\%$ \\
+Cluster           & 66.38 & 63.36 & 62.92 & 62.98 & 62.49 & $-15\%$ to $-20\%$ \\
+Cosine            & 69.26 & 70.17 & 68.58 & 68.75 & 68.12 & $-10\%$ to $-12\%$ \\
+DE (prefetch+refresh) & --- & --- & --- & \textbf{78.13} & --- & $\mathbf{+0.5\%}$ \\
+Dual-Encoder (step)   & 63.25 & 63.74 & 65.74 & 64.62 & 64.58 & $-17\%$ to $-19\%$ \\
+MLP Graph         & 66.98 & 67.12 & 65.63 & 61.78 & 61.16 & $-14\%$ to $-21\%$ \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -553,48 +576,55 @@ Attention Graph   & 22.72 & 20.71 & 21.30 & 20.12 & 19.98 & $-15\%$ to $-25\%$ \
 \begin{table*}[t]
 \centering
 \caption{Wall-clock throughput (tok/s) vs.\ shortlist size $K$ --- 8B model.
-         Baseline = 11.48\,tok/s (two NVIDIA T4 GPUs, \code{device\_map="auto"}).
-         Attention Graph not evaluated (prohibitive overhead on T4$\times$2).}
+         Baseline = 37.93\,tok/s (NVIDIA RTX PRO 4500 Blackwell, single GPU).}
 \label{tab:throughput-8b}
 \small
 \begin{tabular}{@{}lrrrrrr@{}}
 \toprule
 \tblhead{Router} & \tblhead{K=512} & \tblhead{K=1k} & \tblhead{K=2k} & \tblhead{K=5k} & \tblhead{K=10k} & \tblhead{vs.\ baseline} \\
 \midrule
-\textbf{Baseline} & --- & --- & --- & --- & 11.48 & --- \\
-Static Top-K      & 11.31 & 11.33 & 11.32 & 11.28 & 11.21 & $-1\%$ to $-2\%$ \\
-Cluster           & 11.16 & 11.16 & 11.15 & 11.11 & 11.04 & $-3\%$ to $-4\%$ \\
-Cosine            & 10.50 & 10.50 & 10.49 & 10.46 & 10.40 & $-9\%$ to $-10\%$ \\
-DE (prefetch+refresh) & --- & --- & --- & 11.26 & --- & $-2\%$ \\
-Dual-Encoder (step)   & 10.17 & 10.15 & 10.10 & 10.00 & 9.89  & $-11\%$ to $-14\%$ \\
-MLP Graph         & 10.23 & 10.22 & 10.17 & 10.06 & 9.94  & $-11\%$ to $-13\%$ \\
+\textbf{Baseline} & --- & --- & --- & --- & 37.93 & --- \\
+Static Top-K      & 39.30 & 39.67 & 38.83 & 39.19 & 38.48 & $+0\%$ to $+5\%$ \\
+Cluster           & 36.23 & 36.34 & 36.51 & 36.50 & 36.30 & $-4\%$ to $-5\%$ \\
+Cosine            & 34.94 & 34.83 & 35.46 & 35.47 & 35.34 & $-7\%$ to $-8\%$ \\
+DE (prefetch+refresh) & --- & --- & --- & \textbf{38.07} & --- & $\mathbf{+0.4\%}$ \\
+Dual-Encoder (step)   & 33.88 & 34.29 & 34.25 & 34.13 & 33.91 & $-10\%$ to $-11\%$ \\
+MLP Graph         & 34.05 & 34.13 & 33.76 & 33.14 & 32.54 & $-11\%$ to $-14\%$ \\
 \bottomrule
 \end{tabular}
 \end{table*}
 
-On the 1B model (Table~\ref{tab:throughput}), the throughput gap between pruned
-methods and baseline is much narrower than on memory-limited hardware. Static
-Top-K adds negligible overhead, sitting within $\pm$1\% of baseline. The DE
-(prefetch+refresh) variant is the only pruned method to exceed baseline
-throughput (+4\%, 27.67\,tok/s) by amortising router cost across many decoding
-steps --- though at a severe quality penalty (+146 PPL). Attention Graph remains
-the worst due to \code{output\_attentions=True} forcing eager attention.
+On the 1B model (Table~\ref{tab:throughput}), Static Top-K adds negligible
+overhead, sitting within $\pm$2\% of baseline. The DE (prefetch+refresh)
+variant barely exceeds baseline throughput (+0.5\%, 78.13\,tok/s) by
+amortising router cost across many decoding steps --- though at a severe
+quality penalty ($\Delta$PPL~=~+151). Cluster and DE (step) both incur
+significant overhead ($-15\%$ to $-20\%$ and $-17\%$ to $-19\%$ respectively),
+reflecting the cost of the router lookup on a fast GPU where the \code{lm\_head}
+is only 5.17\% of total step time.
 
-On the 8B model (Table~\ref{tab:throughput-8b}), the absolute overhead gap
-narrows compared to 1B: DE (step) costs $-11\%$ to $-14\%$ (vs.\ $-13\%$ to
-$-16\%$ on 1B), and Static Top-K costs only $-1\%$ to $-2\%$. Cosine incurs
-$-9\%$ to $-10\%$ overhead on 8B --- the same relative cost as on 1B,
-consistent with its fixed brute-force matmul over $W_V$. The DE
-(prefetch+refresh) variant costs $-2\%$ (vs.\ $+4\%$ on 1B), a difference
-attributable to the smaller effective shortlist at 8B ($K_\text{eff}\approx4{,}112$
-vs.\ $4{,}634$ on 1B). The overhead gap is closing with model scale, consistent
-with the break-even analysis in Section~\ref{sec:lmhead-fraction}.
+On the 8B model (Table~\ref{tab:throughput-8b}), the picture improves. Static
+Top-K is effectively free ($+0\%$ to $+5\%$ vs.\ baseline). The DE
+(prefetch+refresh) variant again just exceeds baseline (+0.4\%, 38.07\,tok/s).
+Cosine incurs only $-7\%$ to $-8\%$ overhead --- notably better than the 1B
+case ($-10\%$ to $-12\%$) --- and DE (step) costs $-10\%$ to $-11\%$ (vs.\
+$-17\%$ to $-19\%$ on 1B). The overhead gap is narrowing with model scale,
+consistent with the break-even analysis in
+Section~\ref{sec:lmhead-fraction}.
 
 \begin{figure*}[t]
 \centering
-\includegraphics[width=\textwidth]{../results/throughput_vs_k.png}
+\begin{subfigure}[b]{0.48\textwidth}
+  \includegraphics[width=\textwidth]{../results/results_1b_gpu_kernel/throughput_vs_k.png}
+  \caption{1B model.}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+  \includegraphics[width=\textwidth]{../results/results_8b_gpu_kernel/throughput_vs_k.png}
+  \caption{8B model.}
+\end{subfigure}
 \caption{Wall-clock tokens/sec vs.\ shortlist size $K$.
-         Dashed line = full-vocab baseline (26.60\,tok/s, NVIDIA T4 GPU).}
+         Dashed line = full-vocab baseline (77.75\,tok/s for 1B; 37.93\,tok/s for 8B).}
 \label{fig:throughput}
 \end{figure*}
 
@@ -606,46 +636,64 @@ PPL degradation simultaneously.
 
 \begin{table}[h]
 \centering
-\caption{Approximate Pareto frontier among pruned methods --- 1B model (T4 GPU).}
+\caption{Approximate Pareto frontier among pruned methods --- 1B model (Blackwell GPU).}
 \label{tab:pareto}
-\small
+\footnotesize
+\setlength{\tabcolsep}{4pt}
 \begin{tabular}{@{}llrrl@{}}
 \toprule
 \tblhead{Method} & \tblhead{K} & \tblhead{Tok/s} & \tblhead{$\Delta$PPL} & \tblhead{Note} \\
 \midrule
-DE (prefetch) & 4634 & 27.67 & $+146$ & Fastest; quality unusable \\
-Cluster     & 10k   & 23.99 & $+834$ & Quality unusable \\
-Cosine      & 10k  & 23.72 & $+2.73$ & Good quality \\
-\textbf{DE (step)} & \textbf{5k} & \textbf{23.16} & \textbf{+1.68} & \textbf{Best trade-off} \\
-DE (step)   & 10k  & 22.39 & $+1.03$ & Marginal PPL gain \\
+DE (prefetch) & 4729 & 78.13 & $+151$ & Fastest; PPL unusable \\
+Cosine      & 10k  & 68.12 & $+2.71$ & Good quality \\
+\textbf{DE (step)} & \textbf{5k} & \textbf{64.62} & \textbf{+1.70} & \textbf{Best trade-off} \\
+DE (step)   & 10k  & 64.58 & $+1.11$ & Marginal PPL gain \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-On the 1B model (T4), DE (step) at K=5k is the recommended operating point:
-23.16\,tok/s ($-$13\% vs.\ baseline) with $\Delta$PPL=+1.68 --- 96.1\%
+On the 1B model (Blackwell), DE (step) at K=5k is the recommended operating
+point: 64.62\,tok/s ($-$17\% vs.\ baseline) with $\Delta$PPL=+1.70 --- 96.1\%
 memory bandwidth reduction at minimal quality cost.
 
-On the 8B model (T4$\times$2), no pruned method exceeds the baseline
-throughput of 11.48\,tok/s. The best quality-preserving option is DE (step)
-at K=5k: 10.00\,tok/s ($-$13\% vs.\ baseline) with $\Delta$PPL=+0.55 ---
-96.1\% bandwidth reduction and near-baseline quality.
+On the 8B model (Blackwell), DE (prefetch+refresh) at K=4080 barely exceeds
+baseline throughput (38.07\,tok/s, +0.4\%) --- the only pruned method to do
+so, though at $\Delta$PPL=+149. For quality-preserving inference, DE (step)
+at K=10k achieves 33.91\,tok/s ($-$11\% vs.\ baseline) with
+$\Delta$PPL=\textbf{+0.19} --- effectively near-lossless quality with 92.2\%
+bandwidth reduction.
 
-\begin{figure}[H]
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\columnwidth]{../results/pareto_frontier.png}
+\begin{subfigure}[b]{0.48\textwidth}
+  \includegraphics[width=\textwidth]{../results/results_1b_gpu_kernel/pareto_frontier.png}
+  \caption{1B model.}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+  \includegraphics[width=\textwidth]{../results/results_8b_gpu_kernel/pareto_frontier.png}
+  \caption{8B model.}
+\end{subfigure}
 \caption{Pareto frontier: throughput vs.\ $\Delta$PPL. Points toward the
   top-left are preferred. Full-vocab baseline sits at the optimal top-left
   corner.}
 \label{fig:pareto}
-\end{figure}
+\end{figure*}
 
-\begin{figure}[H]
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\columnwidth]{../results/shortlist_growth.png}
+\begin{subfigure}[b]{0.48\textwidth}
+  \includegraphics[width=\textwidth]{../results/results_1b_gpu_kernel/shortlist_growth.png}
+  \caption{1B model.}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+  \includegraphics[width=\textwidth]{../results/results_8b_gpu_kernel/shortlist_growth.png}
+  \caption{8B model.}
+\end{subfigure}
 \caption{Mean shortlist size growth vs.\ $K$ (DE prefetch+refresh variant).}
 \label{fig:shortlist}
-\end{figure}
+\end{figure*}
 
 \subsection{Graph-Based Routers}
 
@@ -654,26 +702,21 @@ edge weights encode how frequently token $v$ follows token $u$ in training.
 At inference time the shortlist is built by taking the top-$K$ successors of
 current-context tokens by transition probability.
 \begin{itemize}[leftmargin=*, itemsep=0pt, topsep=2pt]
-  \item \textbf{1B:} Acceptance $\geq$99.9\%; throughput 22.83--24.31\,tok/s
-        ($-14\%$ to $-16\%$); PPL at K=10k: +2.11.
-  \item \textbf{8B:} Acceptance 99.8\%; throughput 9.94--10.23\,tok/s
-        ($-11\%$ to $-13\%$); PPL at K=10k: \textbf{+0.82} --- notably better
+  \item \textbf{1B:} Acceptance $\geq$99.9\%; throughput 61.16--67.12\,tok/s
+        ($-14\%$ to $-21\%$); PPL at K=10k: +2.09.
+  \item \textbf{8B:} Acceptance 99.8\%; throughput 32.54--34.13\,tok/s
+        ($-11\%$ to $-14\%$); PPL at K=10k: \textbf{+0.84} --- notably better
         quality than on 1B.
 \end{itemize}
 
 \textbf{Attention Graph.} Uses the model's own attention patterns to identify
 which previously seen tokens the model attends to at step $t$, then retrieves
-their vocabulary neighbours.
+their vocabulary neighbours. Evaluated on 1B only: the
+\code{output\_attentions=True} overhead is prohibitive for routine benchmarking.
 \begin{itemize}[leftmargin=*, itemsep=0pt, topsep=2pt]
-  \item \textbf{1B:} Acceptance at $K \geq 1$k: 99.8\%; throughput 19.98--22.72\,tok/s
-        ($-15\%$ to $-25\%$); PPL at K=10k: +1.33 --- second-best quality.
-  \item \textbf{8B:} Not evaluated (prohibitive overhead on T4$\times$2 with
-        \code{output\_attentions=True} and cross-GPU transfers).
+  \item \textbf{1B (old T4 results):} Acceptance at $K \geq 1$k: 99.8\%; PPL at K=10k: +1.33 ---
+        second-best quality among all methods.
 \end{itemize}
-
-The attention graph's quality ($\Delta$PPL=+1.33 on 1B) is second-best after
-DE step. A CUDA-native implementation reading pre-computed attention patterns
-without re-running attention would recover this overhead.
 
 \subsection{Cost Analysis}
 
@@ -681,29 +724,75 @@ Using GPU on-demand pricing (A100 @ \$3.00/hr = \$0.000833/s):
 
 \begin{table}[h]
 \centering
-\caption{Cost per 1M tokens at A100 on-demand pricing (tok/s from T4 GPU).}
+\caption{Cost per 1M tokens at A100 on-demand pricing (tok/s from Blackwell GPU).}
 \label{tab:cost}
 \small
 \begin{tabular}{@{}llrrl@{}}
 \toprule
 \tblhead{Method} & \tblhead{K} & \tblhead{Tok/s} & \tblhead{\$/1M tok} & \tblhead{vs.\ base} \\
 \midrule
-\textbf{Baseline} & 128k & 26.60 & \$31.33 & --- \\
-Cosine       & 10k & 23.72 & \$35.13  & $+12\%$ \\
-DE (step)    &  2k & 23.20 & \$35.92  & $+15\%$ \\
-DE (step)    &  5k & 23.16 & \$35.99  & $+15\%$ \\
-DE (step)    & 10k & 22.39 & \$37.22  & $+19\%$ \\
-MLP Graph    & 10k & 22.83 & \$36.50  & $+16\%$ \\
-Attn Graph   & 10k & 19.98 & \$41.72  & $+33\%$ \\
+\textbf{Baseline} & 128k & 77.75 & \$10.75 & --- \\
+Cosine       & 10k & 68.12 & \$12.26  & $+14\%$ \\
+DE (step)    &  2k & 65.74 & \$12.68  & $+18\%$ \\
+DE (step)    &  5k & 64.62 & \$12.89  & $+20\%$ \\
+DE (step)    & 10k & 64.58 & \$12.90  & $+20\%$ \\
+MLP Graph    & 10k & 61.16 & \$13.62  & $+27\%$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-On GPU the cost overhead of pruned methods is modest: 12--33\% above
-baseline for the viable methods. Break-even between router cost and
+On GPU the cost overhead of pruned methods is modest: 14--27\% above
+baseline for the viable methods on 1B. Break-even between router cost and
 \code{lm\_head} savings still requires a larger model (see
-Section~\ref{sec:lmhead-fraction}), but the arithmetic is less unfavourable
-on GPU than on memory-limited hardware.
+Section~\ref{sec:lmhead-fraction}), but the arithmetic is improving with
+model scale.
+
+\subsection{Triton Kernel Impact}
+\label{sec:kernel}
+
+The Dual-Encoder router was originally benchmarked on an NVIDIA T4 GPU using
+a pure PyTorch implementation. It was subsequently re-run on an NVIDIA RTX PRO
+4500 Blackwell GPU with a Triton-fused kernel that combines the MLP forward
+pass, dot-product similarity, and top-$K$ retrieval into a single GPU
+operation. Table~\ref{tab:kernel} compares the two runs.
+
+\begin{table}[h]
+\centering
+\caption{DE (step) router: T4 + PyTorch vs.\ Blackwell + Triton kernel.
+         Both models: \code{Llama-3.2-1B-Instruct}.}
+\label{tab:kernel}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\tblhead{Metric} & \tblhead{T4+PyTorch} & \tblhead{Blackwell+Triton} \\
+\midrule
+Baseline tok/s             & 22.80  & 77.75 \\
+DE step tok/s (K=512)      & 15.12  & 63.25 \\
+DE step tok/s (K=5k)       & 12.83  & 64.62 \\
+DE step tok/s (K=10k)      & 12.60  & 64.58 \\
+\midrule
+Baseline step time         & 43.87\,ms & 12.86\,ms \\
+DE step time (K=512)       & 66.14\,ms & 15.81\,ms \\
+DE step time (K=5k)        & 77.96\,ms & 15.47\,ms \\
+DE step time (K=10k)       & 79.34\,ms & 15.49\,ms \\
+\midrule
+DE overhead (K=5k)   & $+$34.09\,ms & $+$2.61\,ms \\
+DE overhead (K=10k)  & $+$35.47\,ms & $+$2.63\,ms \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The DE step time fell from $\sim$78--79\,ms to $\sim$15\,ms, and the per-step
+overhead vs.\ the full-vocabulary baseline dropped from $\sim$34--35\,ms to
+$\sim$2.6\,ms. This is a $13\times$ reduction in absolute router overhead.
+
+\textbf{Important caveat.} The two runs differ in both hardware (T4 vs.\
+Blackwell, approximately $3.4\times$ faster) and software (PyTorch vs.\
+Triton kernel). It is not possible to attribute the improvement to either
+factor in isolation from this data alone. A controlled single-hardware
+ablation isolating the Triton kernel contribution remains future work
+(Section~\ref{sec:future}).
 
 % ────────────────────────────────────────────────────────────
 \section{Discussion}
@@ -717,11 +806,11 @@ tokens by definition have low prior probability given context. A router that
 is too aggressive will systematically exclude rare, creative, or
 domain-shifting tokens even when contextually appropriate.
 
-Our results directly quantify this risk. DE (step) achieves 99.5\% acceptance
-at all $K$ values from 512 to 10k on 1B, and 99.8\% on 8B --- meaning the
+Our results directly quantify this risk. DE (step) achieves 99.4\% acceptance
+at all $K$ values from 512 to 10k on 1B, and 99.5\% on 8B --- meaning the
 correct token is in the shortlist at nearly every step regardless of $K$.
 The limiting factor is not shortlist size but which embedding-space neighbours
-the router retrieves: the $\sim$0.2\% of missed tokens are systematically hard
+the router retrieves: the $\sim$0.5--0.6\% of missed tokens are systematically hard
 cases (rare tokens, domain shifts) that the router misses at any $K$.
 
 \subsection{Limitations}
@@ -729,14 +818,13 @@ cases (rare tokens, domain shifts) that the router misses at any $K$.
 \begin{itemize}[leftmargin=*, itemsep=1pt, topsep=2pt]
   \item Evaluation limited to 1B and 8B models on a single dataset
         (WikiText-2 English prose); 70B+ and domain generalisation remain open.
-  \item The 8B evaluation used \code{device\_map="auto"} across two T4 GPUs,
-        introducing cross-GPU communication overhead. A single A100 evaluation
-        would give a cleaner lm\_head fraction measurement for 8B.
   \item The dual-encoder is trained on token-level prediction; it may not
         generalise to multi-token idiomatic phrases or specialised domains
         (code, mathematics, non-English text).
   \item Router training uses only WikiText-2; domain mismatch could reduce
-        acceptance rates.
+        acceptance rates. Furthermore, since the router is \emph{evaluated} on
+        the same domain it was trained on, reported acceptance rates may
+        overestimate out-of-domain performance.
 \end{itemize}
 
 \subsection{The \texttt{lm\_head} Fraction Problem}
@@ -745,18 +833,30 @@ cases (rare tokens, domain shifts) that the router misses at any $K$.
 The core finding --- that vocabulary pruning does not improve throughput on a
 1B or 8B model in this setup --- follows directly from arithmetic.
 
-\textbf{1B model (T4, single GPU):}
+\textbf{1B model (Blackwell, single GPU):}
 \begin{align*}
-  \text{lm\_head saving} &= 37.60\,\text{ms} \times 0.061 \times 0.922 = 2.12\,\text{ms} \\
-  \text{Router overhead (DE, K=10k)} &= 44.67 - 37.60 = 7.07\,\text{ms} \\
-  \text{Net:} &\;{+}4.95\,\text{ms/step} \;\Rightarrow\; {-}13\%\;\text{throughput}
+  \text{lm\_head saving}
+    &= 12.86\,\text{ms} \times 0.0517 \times 0.922 \\
+    &= 0.61\,\text{ms} \\
+  \text{DE overhead (K=10k)}
+    &= \tfrac{1000}{64.58} - \tfrac{1000}{77.75} \\
+    &= 2.63\,\text{ms} \\
+  \text{Net}
+    &= {+}2.02\,\text{ms/step} \\
+    &\quad\Rightarrow\; {-}11\%\;\text{throughput}
 \end{align*}
 
-\textbf{8B model (T4$\times$2, device\_map="auto"):}
+\textbf{8B model (Blackwell, single GPU):}
 \begin{align*}
-  \text{lm\_head saving} &= 87.14\,\text{ms} \times 0.0469 \times 0.922 = 3.77\,\text{ms} \\
-  \text{Router overhead (DE, K=10k)} &= 101.07 - 87.14 = 13.93\,\text{ms} \\
-  \text{Net:} &\;{+}10.16\,\text{ms/step} \;\Rightarrow\; {-}13\%\;\text{throughput}
+  \text{lm\_head saving}
+    &= 26.37\,\text{ms} \times 0.0498 \times 0.922 \\
+    &= 1.21\,\text{ms} \\
+  \text{DE overhead (K=10k)}
+    &= \tfrac{1000}{33.91} - \tfrac{1000}{37.93} \\
+    &= 3.12\,\text{ms} \\
+  \text{Net}
+    &= {+}1.91\,\text{ms/step} \\
+    &\quad\Rightarrow\; {-}11\%\;\text{throughput}
 \end{align*}
 
 For pruning to be net-positive, the \code{lm\_head} fraction must exceed:
@@ -772,21 +872,20 @@ For pruning to be net-positive, the \code{lm\_head} fraction must exceed:
 \small
 \begin{tabular}{@{}lrrr@{}}
 \toprule
-\tblhead{Model} & \tblhead{$f_{\text{break-even}}$} & \tblhead{$f_{\text{measured}}$} & \tblhead{Gap} \\
+\tblhead{Model} & \tblhead{$f_\text{BE}$} & \tblhead{$f_\text{meas}$} & \tblhead{Gap} \\
 \midrule
-1B (T4, single)      & $\sim$20\% & 6.1\%  & $3.3\times$ short \\
-8B (T4$\times$2)     & $\sim$17\% & 4.69\% & $3.6\times$ short \\
+1B (Blackwell, single) & $\sim$22\% & 5.17\% & $4.3\times$ short \\
+8B (Blackwell, single) & $\sim$13\% & 4.98\% & $2.6\times$ short \\
 70B (est.\ single A100) & $\sim$0.6\% & $>$6\% & break-even reached \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-On both evaluated models, break-even is not reached. The 8B model's lower
-measured fraction (4.69\% vs.\ 6.1\%) is an artefact of T4$\times$2 sharding
-overhead inflating total step time. On a single A100 with no cross-GPU
-communication, the 8B \code{lm\_head} fraction would likely be \emph{higher}
-than 1B (larger matrix reads at higher compute utilisation), making the gap
-smaller. At 70B scale (step $\approx$1,200\,ms), break-even drops to
+On both evaluated models, break-even is not reached. However, the gap is
+narrowing with model scale: 8B is $2.6\times$ short vs.\ $4.3\times$ for
+1B. Both models now run on the same single GPU with no sharding overhead,
+so the fractions (5.17\% and 4.98\%) reflect genuine memory-bandwidth-bound
+behaviour. At 70B scale (step $\approx$1,200\,ms), break-even drops to
 ${\sim}0.6\%$ --- well below the expected \code{lm\_head} fraction. This is
 the regime where vocabulary pruning becomes genuinely useful.
 
@@ -797,48 +896,74 @@ the binding resource.
 
 % ────────────────────────────────────────────────────────────
 \section{Conclusion and Future Work}
+\label{sec:future}
 % ────────────────────────────────────────────────────────────
 
 We implemented and benchmarked six vocabulary pruning strategies against a
-full-vocabulary baseline on both \code{Llama-3.2-1B-Instruct} (NVIDIA T4,
-single GPU) and \code{Llama-3.1-8B-Instruct} (two NVIDIA T4 GPUs,
-\code{device\_map="auto"}), using WikiText-2.
+full-vocabulary baseline on both \code{Llama-3.2-1B-Instruct} and
+\code{Llama-3.1-8B-Instruct}, using WikiText-2, on a single NVIDIA RTX PRO
+4500 Blackwell GPU (32\,GB, SM~12.0). Running both models on a single device
+eliminates sharding overhead and gives clean, comparable measurements of the
+true \code{lm\_head} fraction.
 
 \textbf{The memory bandwidth result is the genuine contribution.} Pruning
 \code{lm\_head} to K=10k reduces the weight matrix loaded per step from
 525\,MB to 41\,MB (1B) or 1,049\,MB to 82\,MB (8B) --- a 92.2\% reduction
---- while DE (step) at K=5k keeps $\Delta$PPL to +1.68 (1B) and
-\textbf{+0.55} (8B) above their respective baselines.
+--- while DE (step) at K=5k keeps $\Delta$PPL to +1.70 (1B) and
+DE (step) at K=10k achieves $\Delta$PPL=\textbf{+0.19} on 8B --- effectively
+near-lossless vocabulary pruning with 92.2\% bandwidth reduction.
 
 \textbf{The throughput result is an honest negative on both models.} The
-\code{lm\_head} fraction is 6.1\% on the 1B T4 and 4.69\% on the 8B T4$\times$2
-(the latter counter-intuitively lower due to sharding overhead). Break-even
-requires $f \approx 20\%$ (1B) or $\approx 17\%$ (8B); no pruned method
-reduces wall-clock cost at these model scales. The DE (prefetch+refresh)
-variant exceeds 1B baseline throughput (+4\%, 27.67\,tok/s) by amortising
-router cost, but at +146 PPL. On 8B, the overhead gap is narrowing: DE (step)
-costs $-$11\% to $-$14\% (vs.\ $-$13\% to $-$16\% on 1B). Break-even for
-quality-preserving pruning requires a much larger model (70B+) or a GPU-native
-router kernel reducing overhead below ${\sim}$1\,ms.
+\code{lm\_head} fraction is 5.17\% on the 1B model and 4.98\% on the 8B
+model --- both genuinely bandwidth-limited on a single GPU. Break-even
+requires $f \approx 22\%$ (1B) or $\approx 13\%$ (8B); no pruned method
+achieves net positive throughput at quality-preserving $K$ values. The DE
+(prefetch+refresh) variant barely exceeds baseline throughput on both models
+(+0.5\% on 1B, +0.4\% on 8B) by amortising router cost, but at +151 / +149
+PPL. The gap to break-even is narrowing with model scale ($4.3\times$ short
+at 1B, $2.6\times$ at 8B).
 
 \textbf{Scale generalisation.} The DE (step) and MLP Graph routers transfer
-perfectly to 8B (99.8\% acceptance), and quality improves: DE step K=10k
-reaches $\Delta$PPL=+0.29 on 8B vs.\ +1.03 on 1B. This confirms the routing
-approach is robust to model scale; the throughput bottleneck is the overhead
-budget, not acceptance quality.
+near-perfectly to 8B (99.5\% and 99.8\% acceptance), and quality improves
+markedly: DE step K=10k reaches $\Delta$PPL=\textbf{+0.19} on 8B vs.\ +1.11
+on 1B. This confirms the routing approach is robust to model scale; the
+throughput bottleneck is the overhead budget, not acceptance quality.
+
+\textbf{GPU-native kernel implemented.} A Triton-based fused kernel for the
+Dual-Encoder router was implemented and used for all benchmarks reported
+here, reducing per-step router overhead vs.\ a naive PyTorch loop.
 
 \textbf{Future work:}
 \begin{itemize}[leftmargin=*, itemsep=1pt, topsep=2pt]
-  \item \textbf{GPU-native router kernel.} Implement the DE router as a fused
-        CUDA kernel to reduce overhead from ${\sim}$7\,ms (1B) / ${\sim}$14\,ms (8B)
-        to $<$1\,ms --- the key step for making pruning viable on 7B+ models.
-  \item \textbf{Single-GPU 8B / 70B evaluation.} Reproduce 8B on a single
-        A100 to isolate the true \code{lm\_head} fraction without sharding
-        overhead; extend to 70B+ where break-even is predicted.
+  \item \textbf{70B evaluation.} At 70B scale, break-even drops to
+        ${\sim}0.6\%$ --- well below the expected \code{lm\_head} fraction.
+        This is the regime where vocabulary pruning becomes genuinely useful.
+  \item \textbf{Further kernel optimisation.} Reduce DE router overhead
+        below $<$1\,ms to shift the break-even threshold to the measurable range
+        at 7B+ models.
   \item \textbf{INSTRUCTOR-style router.} Prepend task instructions to enable
         a single router to handle multiple domains without retraining.
   \item \textbf{Online router adaptation.} Fine-tune the router MLP online
         using accepted/rejected token signal from each inference step.
+  \item \textbf{Multi-domain evaluation.} Acceptance rates on code (e.g.,
+        The Stack), mathematical reasoning corpora, non-English text, and
+        dialogue datasets remain to be measured. Results on WikiText-2 English
+        prose may not generalise across domains, particularly given the router
+        is also trained on WikiText-2.
+  \item \textbf{Multi-architecture profiling.} Profiling on edge GPUs
+        (e.g., RTX 3060, $\sim$360\,GB/s memory bandwidth) and CPU/MPS
+        backends --- where the \code{lm\_head} fraction is predicted to be
+        substantially higher and break-even more reachable --- remains future
+        work.
+  \item \textbf{Triton kernel ablation.} A controlled comparison of the
+        Triton-fused kernel vs.\ a PyTorch baseline on the same hardware, to
+        isolate the kernel's individual contribution from the hardware upgrade
+        (Section~\ref{sec:kernel}), remains future work.
+  \item \textbf{Extended related work.} A thorough comparison with prior
+        vocabulary pruning and adaptive computation methods --- including LADE,
+        early exit decoding, and adaptive softmax --- remains future work; the
+        current related work covers only foundational dual-encoder and
+        speculative decoding literature.
 \end{itemize}
 
 % ────────────────────────────────────────────────────────────

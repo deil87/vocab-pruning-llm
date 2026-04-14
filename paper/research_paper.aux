@@ -1,0 +1,93 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.1}The Autoregressive Bottleneck}{1}{subsection.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.2}The Wasted Computation Insight}{1}{subsection.1.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.3}Contributions}{1}{subsection.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}Background}{1}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Self-Attention and the Hidden State}{1}{subsection.2.1}\protected@file@percent }
+\citation{leviathan2023}
+\citation{chen2023}
+\citation{henderson2017}
+\citation{karpukhin2020}
+\citation{merity2016}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}The \texttt  {lm\_head} as a Bottleneck}{2}{subsection.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Related Work}{2}{subsection.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Dual-Encoders and Contrastive Learning}{2}{subsection.2.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Method}{2}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Problem Formalisation}{2}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Router Taxonomy}{2}{subsection.3.2}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Router taxonomy.}}{2}{table.caption.1}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{tab:routers}{{1}{2}{Router taxonomy}{table.caption.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Dual-Encoder Router Design}{2}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.3.1}Architecture}{2}{subsubsection.3.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.3.2}Training Data Construction}{2}{subsubsection.3.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.3.3}Training Objective}{2}{subsubsection.3.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.3.4}Inference Integration}{2}{subsubsection.3.3.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Experimental Setup}{2}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Models}{2}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Dataset}{2}{subsection.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Hardware}{3}{subsection.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Evaluation Metrics}{3}{subsection.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Results}{3}{section.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Baseline Profiling}{3}{subsection.5.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Full-vocabulary baseline measurements for both models (single NVIDIA RTX PRO 4500 Blackwell GPU).}}{3}{table.caption.2}\protected@file@percent }
+\newlabel{tab:baseline}{{2}{3}{Full-vocabulary baseline measurements for both models (single NVIDIA RTX PRO 4500 Blackwell GPU)}{table.caption.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Token Acceptance Rate vs.\ K}{3}{subsection.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Perplexity Degradation vs.\ K}{3}{subsection.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}Tokens/sec vs.\ K}{3}{subsection.5.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5}Pareto Frontier: Quality vs.\ Speed}{3}{subsection.5.5}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Baseline decode step profiling: per-operation time breakdown (single NVIDIA RTX PRO 4500 Blackwell GPU).}}{4}{figure.caption.3}\protected@file@percent }
+\newlabel{fig:baseline}{{1}{4}{Baseline decode step profiling: per-operation time breakdown (single NVIDIA RTX PRO 4500 Blackwell GPU)}{figure.caption.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Token acceptance rate (\%) vs.\ shortlist size $K$ --- 1B model (Blackwell, single GPU).}}{4}{table.caption.4}\protected@file@percent }
+\newlabel{tab:acceptance}{{3}{4}{Token acceptance rate (\%) vs.\ shortlist size $K$ --- 1B model (Blackwell, single GPU)}{table.caption.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.6}Graph-Based Routers}{4}{subsection.5.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.7}Cost Analysis}{4}{subsection.5.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.8}Triton Kernel Impact}{4}{subsection.5.8}\protected@file@percent }
+\newlabel{sec:kernel}{{5.8}{4}{Triton Kernel Impact}{subsection.5.8}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Discussion}{4}{section.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.1}The Blind-Spot Risk}{4}{subsection.6.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Token acceptance rate (\%) vs.\ shortlist size $K$ --- 8B model (Blackwell, single GPU).}}{5}{table.caption.5}\protected@file@percent }
+\newlabel{tab:acceptance-8b}{{4}{5}{Token acceptance rate (\%) vs.\ shortlist size $K$ --- 8B model (Blackwell, single GPU)}{table.caption.5}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Token acceptance rate vs.\ shortlist size $K$ for all routers.}}{5}{figure.caption.6}\protected@file@percent }
+\newlabel{fig:acceptance}{{2}{5}{Token acceptance rate vs.\ shortlist size $K$ for all routers}{figure.caption.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.2}Limitations}{5}{subsection.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.3}The \texttt  {lm\_head} Fraction Problem}{5}{subsection.6.3}\protected@file@percent }
+\newlabel{sec:lmhead-fraction}{{6.3}{5}{The \texttt {lm\_head} Fraction Problem}{subsection.6.3}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {7}Conclusion and Future Work}{5}{section.7}\protected@file@percent }
+\newlabel{sec:future}{{7}{5}{Conclusion and Future Work}{section.7}{}}
+\bibstyle{plain}
+\bibcite{chen2023}{1}
+\bibcite{henderson2017}{2}
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces Perplexity degradation ($\Delta $PPL) vs.\ shortlist size $K$ --- 1B model (baseline PPL = 26.256). Static Top-K and Cluster omitted due to extreme values ($\Delta $PPL $> 10^6$).}}{6}{table.caption.7}\protected@file@percent }
+\newlabel{tab:ppl}{{5}{6}{Perplexity degradation ($\Delta $PPL) vs.\ shortlist size $K$ --- 1B model (baseline PPL = 26.256). Static Top-K and Cluster omitted due to extreme values ($\Delta $PPL $> 10^6$)}{table.caption.7}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {6}{\ignorespaces Perplexity degradation ($\Delta $PPL) vs.\ shortlist size $K$ --- 8B model (baseline PPL = 16.623). Static Top-K and Cluster omitted (extreme values: $\Delta $PPL $\gg 10^3$).}}{6}{table.caption.8}\protected@file@percent }
+\newlabel{tab:ppl-8b}{{6}{6}{Perplexity degradation ($\Delta $PPL) vs.\ shortlist size $K$ --- 8B model (baseline PPL = 16.623). Static Top-K and Cluster omitted (extreme values: $\Delta $PPL $\gg 10^3$)}{table.caption.8}{}}
+\bibcite{karpukhin2020}{3}
+\bibcite{leviathan2023}{4}
+\bibcite{merity2016}{5}
+\bibcite{su2022}{6}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Perplexity degradation ($\Delta $PPL) vs.\ shortlist size $K$. Static Top-K and Cluster are omitted due to extreme values.}}{7}{figure.caption.9}\protected@file@percent }
+\newlabel{fig:ppl}{{3}{7}{Perplexity degradation ($\Delta $PPL) vs.\ shortlist size $K$. Static Top-K and Cluster are omitted due to extreme values}{figure.caption.9}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {7}{\ignorespaces Wall-clock throughput (tok/s) vs.\ shortlist size $K$ --- 1B model. Baseline = 77.75\,tok/s (NVIDIA RTX PRO 4500 Blackwell, single GPU).}}{7}{table.caption.10}\protected@file@percent }
+\newlabel{tab:throughput}{{7}{7}{Wall-clock throughput (tok/s) vs.\ shortlist size $K$ --- 1B model. Baseline = 77.75\,tok/s (NVIDIA RTX PRO 4500 Blackwell, single GPU)}{table.caption.10}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {8}{\ignorespaces Wall-clock throughput (tok/s) vs.\ shortlist size $K$ --- 8B model. Baseline = 37.93\,tok/s (NVIDIA RTX PRO 4500 Blackwell, single GPU).}}{8}{table.caption.11}\protected@file@percent }
+\newlabel{tab:throughput-8b}{{8}{8}{Wall-clock throughput (tok/s) vs.\ shortlist size $K$ --- 8B model. Baseline = 37.93\,tok/s (NVIDIA RTX PRO 4500 Blackwell, single GPU)}{table.caption.11}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Wall-clock tokens/sec vs.\ shortlist size $K$. Dashed line = full-vocab baseline (77.75\,tok/s for 1B; 37.93\,tok/s for 8B).}}{8}{figure.caption.12}\protected@file@percent }
+\newlabel{fig:throughput}{{4}{8}{Wall-clock tokens/sec vs.\ shortlist size $K$. Dashed line = full-vocab baseline (77.75\,tok/s for 1B; 37.93\,tok/s for 8B)}{figure.caption.12}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {9}{\ignorespaces Approximate Pareto frontier among pruned methods --- 1B model (Blackwell GPU).}}{8}{table.caption.13}\protected@file@percent }
+\newlabel{tab:pareto}{{9}{8}{Approximate Pareto frontier among pruned methods --- 1B model (Blackwell GPU)}{table.caption.13}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {10}{\ignorespaces Cost per 1M tokens at A100 on-demand pricing (tok/s from Blackwell GPU).}}{8}{table.caption.16}\protected@file@percent }
+\newlabel{tab:cost}{{10}{8}{Cost per 1M tokens at A100 on-demand pricing (tok/s from Blackwell GPU)}{table.caption.16}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {11}{\ignorespaces DE (step) router: T4 + PyTorch vs.\ Blackwell + Triton kernel. Both models: \texttt  {Llama-3.2-1B-Instruct}.}}{8}{table.caption.17}\protected@file@percent }
+\newlabel{tab:kernel}{{11}{8}{DE (step) router: T4 + PyTorch vs.\ Blackwell + Triton kernel. Both models: \code {Llama-3.2-1B-Instruct}}{table.caption.17}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {12}{\ignorespaces Break-even \texttt  {lm\_head} fraction vs.\ measured value.}}{8}{table.caption.18}\protected@file@percent }
+\newlabel{tab:breakeven}{{12}{8}{Break-even \code {lm\_head} fraction vs.\ measured value}{table.caption.18}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Pareto frontier: throughput vs.\ $\Delta $PPL. Points toward the top-left are preferred. Full-vocab baseline sits at the optimal top-left corner.}}{9}{figure.caption.14}\protected@file@percent }
+\newlabel{fig:pareto}{{5}{9}{Pareto frontier: throughput vs.\ $\Delta $PPL. Points toward the top-left are preferred. Full-vocab baseline sits at the optimal top-left corner}{figure.caption.14}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {6}{\ignorespaces Mean shortlist size growth vs.\ $K$ (DE prefetch+refresh variant).}}{9}{figure.caption.15}\protected@file@percent }
+\newlabel{fig:shortlist}{{6}{9}{Mean shortlist size growth vs.\ $K$ (DE prefetch+refresh variant)}{figure.caption.15}{}}
+\gdef \@abspage@last{9}
