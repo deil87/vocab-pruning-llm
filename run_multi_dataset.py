@@ -140,9 +140,11 @@ def _pruned_ppl_and_acceptance(
     Compute (pruned_ppl, acceptance_rate) for the DE (step) router at shortlist size K.
 
     At each token position:
-      - query  = router(h_T)           [d_r]
-      - scores = query @ proj_index.T  [N]
-      - top-K completions → union of tokens → shortlist
+      - query       = router(h_T)                          [d_r]
+      - scores      = query @ proj_index.T                 [N]
+      - n_retrieve  = max(CFG.n_retrieve, ceil(K / completion_len))
+        → scaled so the token union roughly reaches K tokens
+      - top-n_retrieve completions → union of tokens → shortlist (trimmed to K)
       - NLL computed over shortlist; penalty -log(1e-9) if target missing
     """
     tokens = _texts_to_tokens(test_texts, tokenizer, max_tokens)
@@ -153,6 +155,12 @@ def _pruned_ppl_and_acceptance(
     # Project index lives on CPU (consistent with existing evaluate.py pattern)
     proj_cpu = proj_index.cpu()
     router.eval()
+
+    # How many completions to retrieve so the token union reaches ~K.
+    # completion_len tokens per completion on average; retrieve enough to hit K,
+    # but at least CFG.n_retrieve and at most the index size.
+    n_index = len(completion_token_lists)
+    n_retrieve = min(n_index, max(CFG.n_retrieve, math.ceil(k / CFG.completion_len)))
 
     with torch.no_grad():
         for begin in tqdm(range(0, seq_len - 1, stride), desc=f"PPL K={k}", leave=False):
@@ -166,13 +174,13 @@ def _pruned_ppl_and_acceptance(
                 h = hiddens[0, t].float().cpu()           # [d]
                 query = router(h.unsqueeze(0)).squeeze(0) # [d_r]
                 scores = query @ proj_cpu.T               # [N]
-                top_completions = scores.topk(CFG.n_retrieve).indices  # [n_retrieve]
+                top_completions = scores.topk(n_retrieve).indices  # [n_retrieve]
 
                 # Union of tokens across top completions → shortlist
                 token_sets = [completion_token_lists[i] for i in top_completions.tolist()]
                 shortlist = torch.cat(token_sets).unique()
 
-                # Trim / pad to exactly K if needed (union may be slightly over/under)
+                # Trim to K if the union exceeds it
                 if len(shortlist) > k:
                     shortlist = shortlist[:k]
 
@@ -297,16 +305,20 @@ def run_sweep(
         # Temporarily patch CFG so build_completion_index uses our size override
         _orig_n_index = CFG.n_index_completions
         CFG.n_index_completions = _n_index_completions
-        completion_token_lists, completion_index, _ = build_completion_index(
-            model, tokenizer, raw_shim
-        )
-        CFG.n_index_completions = _orig_n_index
+        try:
+            completion_token_lists, completion_index, _ = build_completion_index(
+                model, tokenizer, raw_shim
+            )
+        finally:
+            CFG.n_index_completions = _orig_n_index
 
         # ── 4. Train a fresh router on this dataset ───────────────────────────
         _orig_n_pairs = CFG.n_train_pairs
         CFG.n_train_pairs = _n_train_pairs
-        router, key_projector = train_router(model, train_tokens)
-        CFG.n_train_pairs = _orig_n_pairs
+        try:
+            router, key_projector = train_router(model, train_tokens)
+        finally:
+            CFG.n_train_pairs = _orig_n_pairs
         router.eval()
         key_projector.eval()
 
