@@ -4,8 +4,8 @@ Research and implementation of a **Dual-Encoder Router** that prunes the LLM voc
 decoding step, reducing the cost of the `lm_head` matrix multiplication without changing model
 weights or requiring speculative decoding.
 
-**Paper:** [`paper/research_paper.pdf`](paper/research_paper.pdf)
-*(arXiv submission in progress — link will be added here)*
+**Paper:** [`paper/research_paper.pdf`](paper/research_paper.pdf)  
+**Preprint:** [zenodo.org/records/19565831](https://zenodo.org/records/19565831) — DOI: [10.5281/zenodo.19565831](https://doi.org/10.5281/zenodo.19565831)
 
 ---
 
@@ -240,16 +240,14 @@ Output: `paper/research_paper.pdf`
 
 ## Citation
 
-Once the arXiv preprint is live, cite as:
-
 ```bibtex
-@misc{XXXX,
-  title   = {Context-Aware Vocabulary Pruning for {LLM} Inference Acceleration},
-  author  = {Andrey Spiridonov},
-  year    = {2026},
-  eprint  = {XXXX.XXXXX},
-  archivePrefix = {arXiv},
-  primaryClass  = {cs.CL}
+@misc{spiridonov2026vocabpruning,
+  title     = {Context-Aware Vocabulary Pruning for {LLM} Inference Acceleration},
+  author    = {Andrey Spiridonov},
+  year      = {2026},
+  doi       = {10.5281/zenodo.19565831},
+  url       = {https://zenodo.org/records/19565831},
+  publisher = {Zenodo}
 }
 ```
 
@@ -258,4 +256,4 @@ Once the arXiv preprint is live, cite as:
 ## License
 
 Code: [Apache 2.0](LICENSE).  
-Paper (`paper/`): arXiv non-exclusive license — all rights reserved by the author.
+Paper (`paper/`): [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) — Andrey Spiridonov.
